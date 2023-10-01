@@ -1,6 +1,11 @@
 package raft
 
-import "log"
+import (
+	"crypto/rand"
+	"log"
+	"math/big"
+	"time"
+)
 
 // Debugging
 const Debug = false
@@ -10,4 +15,18 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 		log.Printf(format, a...)
 	}
 	return
+}
+
+//baseTimeout:最小超时时间
+const baseTimeout = 240
+
+//randomElectionTimeout:随机超时时间（240-360ms）
+func randomElectionTimeout() time.Duration {
+	//To prevent split votes in the first place, election timeouts are chosen randomly from a fixed interval (e.g., 150–300ms)
+	//由于存在丢包，这里这是为240-360ms
+	extendedTimeout, err := rand.Int(rand.Reader, big.NewInt(120))
+	if err == nil {
+
+	}
+	return time.Duration(baseTimeout+extendedTimeout.Int64()) * time.Millisecond
 }
