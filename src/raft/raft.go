@@ -18,8 +18,9 @@ package raft
 //
 
 import (
-	"fmt"
-
+	"io"
+	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,7 +39,26 @@ const (
 // HEARTBEAT_INTERVAL 心跳间隔50ms
 const HEARTBEAT_INTERVAL = 50 * time.Millisecond
 
-// as each Raft peer becomes aware that successive log entries are
+var logger *log.Logger
+
+func init() {
+	//初始化方法
+	//日志系统初始化
+	writer, err := os.OpenFile("log.txt", os.O_WRONLY|os.O_CREATE, 0755)
+	if err != nil {
+		log.Fatalf("create file log.txt failed: %v", err)
+	}
+	log.SetFlags(log.Lshortfile | log.Ldate | log.Lmicroseconds)
+	logger = log.New(io.MultiWriter(writer), "", log.Lshortfile|log.LstdFlags)
+}
+
+// LogEntry 日志实体结构
+type LogEntry struct {
+	Term    int         // 任期
+	Command interface{} // 命令
+}
+
+// ApplyMsg as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make(). set
 // CommandValid to true to indicate that the ApplyMsg contains a newly
@@ -69,25 +89,30 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	// Your data here (2A, 2B, 2C).
-	currentTerm    int           //latest term server has seen (initialized to 0	on first boot, increases monotonically)
-	votedFor       int           //candidateId that received vote in current	term (or null if none)
-	logs           []interface{} //log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1
-	state          STATE         //enum for state(follower , candidate and leader)
-	electionTimer  *time.Timer   //timeout
-	heartbeatTimer *time.Timer   //heartbeatTimer
+	currentTerm    int         //latest term server has seen (initialized to 0	on first boot, increases monotonically)
+	votedFor       int         //candidateId that received vote in current	term (or null if none)
+	logs           []LogEntry  //log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1
+	state          STATE       //enum for state(follower , candidate and leader)
+	electionTimer  *time.Timer //timeout
+	heartbeatTimer *time.Timer //heartbeatTimer
+
+	commitIndex int   //index of the highest log entry know to bew committed(init to 0)
+	lastApplied int   //index of the highest log entry applied to state machine(init to 0)
+	nextIndex   []int //for each server,index of the next log entry to send to that server(initialized to leader last log index +1)
+	matchIndex  []int //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
+
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
-
 }
 
 // AppendEntriesArgs request for AppendEntries RPC
 type AppendEntriesArgs struct {
-	Term         int           //leader's term
-	LeaderId     int           //so follower can redirect clients
-	PrevLogIndex int           //index of log entry immediately preceding new ones
-	PrevLogTerm  int           //term of prevLogIndex entry
-	Entries      []interface{} //log entries to store (empty for heartbeat;	may send more than one for efficiency)
-	LeaderCommit bool          //leader’s commitIndex
+	Term         int        //leader's term
+	LeaderId     int        //so follower can redirect clients
+	PrevLogIndex int        //index of log entry immediately preceding new ones
+	PrevLogTerm  int        //term of prevLogIndex entry
+	Entries      []LogEntry //log entries to store (empty for heartbeat;	may send more than one for efficiency)
+	LeaderCommit int        //leader’s commitIndex
 
 }
 
@@ -105,7 +130,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 	if args.Term < rf.currentTerm {
-		//fmt.Printf("%d屈服于%d(1),term:(%d,%d)\n", args.LeaderId, rf.me, rf.currentTerm, args.Term)
+		//logger.Printf("%d屈服于%d(1),term:(%d,%d)\n", args.LeaderId, rf.me, rf.currentTerm, args.Term)
 		// Reply false if term < currentTerm
 		//如果leader的term比某一个follower的term还小，说明有问题
 		reply.Success = false
@@ -117,12 +142,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		// If RPC request contains term T > currentTerm
 		// 更新状态
-		//fmt.Printf("%d屈服于%d(2),term:(%d,%d)\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		//logger.Printf("%d屈服于%d(2),term:(%d,%d)\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 	}
 
+	//follower 在prevLogIndex 位置没有entry
+	if args.PrevLogIndex >= len(rf.logs) {
+		reply.Term, reply.Success = rf.currentTerm, false
+		logger.Printf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because prevLogIndex %v >= logs.len %v", rf.me, args, args.LeaderId, args.PrevLogIndex, len(rf.logs))
+		return
+	}
+
+	//在prevLogIndex位置entry的term与leader不同
+	if args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+		reply.Term, reply.Success = rf.currentTerm, false
+		logger.Printf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because PrevLogTerm %v != rf.logs[args.PrevLogIndex].Term %v", rf.me, args, args.LeaderId, args.PrevLogIndex, len(rf.logs))
+		return
+	}
+	logIndex := args.PrevLogIndex + 1
+	//日志复制
+	if logIndex <= len(rf.logs)-1 {
+		//日志冲突，leader强一致，删除不同的所有日志
+		//切片为左开右闭原则
+		rf.logs = rf.logs[:logIndex]
+	}
+	for i := 0; i < len(args.Entries); i++ {
+		//日志添加
+		rf.logs = append(rf.logs, args.Entries[i])
+	}
+	//leaderCommit > commitIndex，令 commitIndex = min(leaderCommit, index of last new entry)
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+	}
 	// received AppendEntries RPC from current leader, reset election timer
 	//更新随机超时时间()
 	rf.electionTimer.Reset(randomElectionTimeout())
@@ -142,7 +195,7 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.currentTerm
 	isleader = rf.state == LEADER
 	//rf.mu.RUnlock()
-	println(rf.me, "任期为：", term, "是否为leader：", isleader)
+	logger.Println(rf.me, "任期为：", term, "是否为leader：", isleader)
 	return term, isleader
 }
 
@@ -276,6 +329,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
+//rpc to call the RequestVote
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -321,7 +375,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	println(rf.me, "死掉了")
+	logger.Println(rf.me, "死掉了")
 }
 
 func (rf *Raft) killed() bool {
@@ -336,7 +390,7 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			rf.mu.Lock()
-			//fmt.Printf("%d号超时,身份是%d\n", rf.me, rf.state)
+			//logger.Printf("%d号超时,身份是%d\n", rf.me, rf.state)
 			if rf.state == LEADER {
 				//if is a leader:beak
 				rf.mu.Unlock()
@@ -355,19 +409,18 @@ func (rf *Raft) ticker() {
 
 //heartbeat 同步发送心跳给指定的server
 func (rf *Raft) heartbeat(server int) {
-	//fmt.Printf("%d->%d\n", rf.me, server)
+	//logger.Printf("%d->%d\n", rf.me, server)
 	args := AppendEntriesArgs{LeaderId: rf.me}
 	reply := AppendEntriesReply{}
 	rf.mu.RLock()
 	args.Term = rf.currentTerm
 	rf.mu.RUnlock()
 	if ok := rf.sendAppendEntries(server, &args, &reply); !ok {
-		//fmt.Printf("%d心跳丢失->%d\n", rf.me, server)
+		//logger.Printf("%d心跳丢失->%d\n", rf.me, server)
 		return
 	}
 	rf.mu.Lock()
-	if reply.Term > rf.currentTerm || !reply.Success {
-		println(reply.Success)
+	if reply.Term > rf.currentTerm {
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
 		rf.state = FOLLOWER
@@ -380,9 +433,21 @@ func (rf *Raft) heartbeat(server int) {
 }
 
 //Execute the activities of the leader
+//leader的状态转化
 //定期发送心跳广播
 func (rf *Raft) startLeaderAction() {
-	fmt.Printf("%d号成为leader\n", rf.me)
+	logger.Printf("%d号成为leader\n", rf.me)
+	rf.mu.Lock()
+	rf.nextIndex = make([]int, len(rf.peers))
+	rf.matchIndex = make([]int, len(rf.peers))
+	nextIndexInit := len(rf.logs)
+	//nextIndex 初始化为leader的log的最后一条索引+1
+	//matchIndex 初始化为0
+	for i := 0; i < len(rf.peers); i++ {
+		rf.nextIndex[i] = nextIndexInit
+		rf.matchIndex[i] = 0
+	}
+	rf.mu.Unlock()
 	//rf.electionTimer.Stop()
 	//匿名函数：异步广播
 	broadcast := func() {
@@ -401,7 +466,7 @@ func (rf *Raft) startLeaderAction() {
 			break
 		}
 		rf.mu.RUnlock()
-		//fmt.Printf("%d - %d - %d\n", rf.me, rf.currentTerm, rf.state)
+		//logger.Printf("%d - %d - %d\n", rf.me, rf.currentTerm, rf.state)
 		broadcast()
 		rf.heartbeatTimer.Reset(HEARTBEAT_INTERVAL)
 		<-rf.heartbeatTimer.C
@@ -427,18 +492,18 @@ func (rf *Raft) elections() {
 			continue
 		}
 		//异步拉票
-		//fmt.Printf("%d拉票于%d，权重为%d\n", rf.me, i, rf.currentTerm)
+		//logger.Printf("%d拉票于%d，权重为%d\n", rf.me, i, rf.currentTerm)
 		go func(i int) {
 			reply := RequestVoteReply{}
 			if ok := rf.sendRequestVote(i, &requestVoteArg, &reply); !ok {
 				//异常情况也要算成失败
-				//println("拉票异常", rf.me, "->", i)
+				//logger.Println("拉票异常", rf.me, "->", i)
 				voteCh <- false
 				return
 			}
 			rf.mu.Lock()
 			if reply.Term > rf.currentTerm {
-				//fmt.Printf("%d拉票于%d成功，变为follower\n", rf.me, i)
+				//logger.Printf("%d拉票于%d成功，变为follower\n", rf.me, i)
 				// If RPC response contains term T > currentTerm:
 				// set currentTerm = T, convert to follower
 				rf.currentTerm = reply.Term
@@ -448,7 +513,7 @@ func (rf *Raft) elections() {
 				rf.mu.Unlock()
 				return
 			}
-			//fmt.Printf("%d拉票于%d成功，权重为%d\n", rf.me, i, rf.currentTerm)
+			//logger.Printf("%d拉票于%d成功，权重为%d\n", rf.me, i, rf.currentTerm)
 			rf.mu.Unlock()
 			voteCh <- reply.VoteGranted
 		}(i)
@@ -508,7 +573,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	println(me, "初始化完成")
+	logger.Println(me, "初始化完成")
 	go rf.ticker()
 	return rf
 }

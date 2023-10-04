@@ -30,3 +30,10 @@ func randomElectionTimeout() time.Duration {
 	}
 	return time.Duration(baseTimeout+extendedTimeout.Int64()) * time.Millisecond
 }
+
+func min(a int, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
