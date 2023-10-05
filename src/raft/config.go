@@ -555,6 +555,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0
+	//time.Sleep(2 * time.Second)
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
 		// try all the servers, maybe one is the leader.
 		index := -1
@@ -574,14 +575,16 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 			}
 		}
-
+		logger.Printf("KEY STEP:find the leader[%v]", index)
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
+				logger.Printf("KEY VARIABLE: nd[%v], cmd1[%v] expectedServers[%v]", nd, cmd1, expectedServers)
 				if nd > 0 && nd >= expectedServers {
+					logger.Printf("KEY VARIABLE: cmd1[%v], cmd[%v]", cmd1, cmd)
 					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.

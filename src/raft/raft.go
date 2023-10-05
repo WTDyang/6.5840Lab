@@ -44,12 +44,16 @@ var logger *log.Logger
 func init() {
 	//初始化方法
 	//日志系统初始化
-	writer, err := os.OpenFile("log.txt", os.O_WRONLY|os.O_CREATE, 0755)
+	writer, err := os.OpenFile("log.txt", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0755)
 	if err != nil {
 		log.Fatalf("create file log.txt failed: %v", err)
 	}
-	log.SetFlags(log.Lshortfile | log.Ldate | log.Lmicroseconds)
-	logger = log.New(io.MultiWriter(writer), "", log.Lshortfile|log.LstdFlags)
+	title := "----------" + time.Now().String() + "------------\n"
+	_, err = writer.WriteString(title)
+	if err != nil {
+		log.Fatalf("write the title failed: %v", err)
+	}
+	logger = log.New(io.MultiWriter(writer), "", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 }
 
 // LogEntry 日志实体结构
@@ -96,11 +100,11 @@ type Raft struct {
 	electionTimer  *time.Timer //timeout
 	heartbeatTimer *time.Timer //heartbeatTimer
 
-	commitIndex int   //index of the highest log entry know to bew committed(init to 0)
-	lastApplied int   //index of the highest log entry applied to state machine(init to 0)
-	nextIndex   []int //for each server,index of the next log entry to send to that server(initialized to leader last log index +1)
-	matchIndex  []int //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
-
+	commitIndex int           //index of the highest log entry know to bew committed(init to 0)
+	lastApplied int           //index of the highest log entry applied to state machine(init to 0)
+	nextIndex   []int         //for each server,index of the next log entry to send to that server(initialized to leader last log index +1)
+	matchIndex  []int         //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
+	applyCh     chan ApplyMsg //chan to apply
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 }
@@ -163,18 +167,31 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	logIndex := args.PrevLogIndex + 1
 	//日志复制
-	if logIndex <= len(rf.logs)-1 {
+	if logIndex <= len(rf.logs)-1 && rf.logs[logIndex].Term != args.PrevLogTerm {
 		//日志冲突，leader强一致，删除不同的所有日志
 		//切片为左开右闭原则
+		dropLogs := rf.logs[logIndex:len(rf.logs)]
+		logger.Printf("FOLLOWER Node[%v] Term[%v] 删除不一致日志，起始索引为:%v, log:%v， logIndex[%v] len(rf.log)[%v]", rf.me, rf.currentTerm, logIndex, dropLogs, logIndex, len(rf.logs))
 		rf.logs = rf.logs[:logIndex]
 	}
 	for i := 0; i < len(args.Entries); i++ {
 		//日志添加
+		logger.Printf("FOLLOWER Node[%v] Term[%v] 追加索引，索引为:%v, 内容为%v", rf.me, rf.currentTerm, logIndex+i, args.Entries[i].Command)
 		rf.logs = append(rf.logs, args.Entries[i])
 	}
 	//leaderCommit > commitIndex，令 commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
+		lastCommitIndex := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		//同步提交日志
+		for i := lastCommitIndex + 1; i <= rf.commitIndex; i++ {
+			logger.Printf("FOLLOWER Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, i+1, rf.logs[i].Command)
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logs[i].Command,
+				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
+			}
+		}
 	}
 	// received AppendEntries RPC from current leader, reset election timer
 	//更新随机超时时间()
@@ -355,15 +372,20 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
+	index := len(rf.logs) + 1
+	term := rf.currentTerm
+	isLeader := rf.state == LEADER
+	if !isLeader {
+		//不是leader不处理，直接返回
+		return index, term, isLeader
+	}
+
 	LogEntry := LogEntry{
 		Term:    rf.currentTerm,
 		Command: command,
 	}
 	rf.logs = append(rf.logs, LogEntry)
-	index := len(rf.logs) - 1
-	term := rf.currentTerm
-	isLeader := rf.state == LEADER
-
+	logger.Printf("Node[%v]传入命令[%v],index:%v,term:%v,isLeader:%v", rf.me, command, index, term, isLeader)
 	return index, term, isLeader
 }
 
@@ -414,7 +436,7 @@ func (rf *Raft) ticker() {
 //heartbeat 同步发送心跳给指定的server
 func (rf *Raft) heartbeat(server int) {
 	//logger.Printf("%d->%d\n", rf.me, server)
-	args := AppendEntriesArgs{PrevLogTerm: rf.currentTerm, PrevLogIndex: -1, LeaderId: rf.me}
+	args := AppendEntriesArgs{LeaderCommit: rf.commitIndex, PrevLogTerm: rf.currentTerm, PrevLogIndex: -1, LeaderId: rf.me}
 	reply := AppendEntriesReply{}
 	logFlag := false
 	rf.mu.Lock()
@@ -423,18 +445,17 @@ func (rf *Raft) heartbeat(server int) {
 		logFlag = true
 		args.PrevLogIndex = rf.nextIndex[server] - 1
 		length := len(rf.logs) - rf.nextIndex[server]
-		args.Entries = make([]LogEntry, length)
 		for i := 0; i < length; i++ {
-			args.Entries = append(args.Entries, rf.logs[i+rf.nextIndex[server]])
+			args.Entries = append([]LogEntry{}, rf.logs[i+rf.nextIndex[server]])
 		}
-		logger.Printf("Node[%v] term[%v] 向[%v] 追加日志,nextIndex[server]:%v,len(logs):%v,logs:[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], len(rf.logs), args.Entries)
+		logger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,nextIndex[server]:%v,len(logs):%v,logs:[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], len(args.Entries), args.Entries)
 	}
 	rf.mu.Unlock()
 	rf.mu.RLock()
 	args.Term = rf.currentTerm
 	rf.mu.RUnlock()
 	if ok := rf.sendAppendEntries(server, &args, &reply); !ok {
-		//logger.Printf("%d心跳丢失->%d\n", rf.me, server)
+		logger.Printf("Node[%d]心跳丢失->[%d]\n", rf.me, server)
 		return
 	}
 	rf.mu.Lock()
@@ -449,31 +470,46 @@ func (rf *Raft) heartbeat(server int) {
 	if logFlag {
 		//发生了log的复制
 		if reply.Success {
+			logger.Printf("LEADER Node[%v] Term[%v] 日志复制成功,server[%v],log:%v", rf.me, rf.currentTerm, server, args.Entries)
 			//日志复制成功
 			//新的nextIndex为原来的nextIndex[server](PrevLogIndex+1)+len(args.Entries)
-			rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+			//由于是个高并发问题，可能这里已经被更新了
+			rf.nextIndex[server] = max(rf.nextIndex[server], args.PrevLogIndex+len(args.Entries)+1)
 			rf.matchIndex[server] = rf.nextIndex[server] - 1
 			//查找是否存在可以提交的日志N(过半matchIndex[i] >= N)
 			//这里可以快排的方法快速求出中位数，再看中位数是否符合要求[nLog(n)],为避免增加复杂度，暂且采用简单的方法
 			N := len(rf.logs) - 1 //最大不会超过日志的最大索引
 			for ; N > rf.commitIndex; N-- {
 				//最小也要比上一次提交的小
-				cnt := 0
-				for _, matchIndex := range rf.matchIndex {
+				cnt := 1
+				for index, matchIndex := range rf.matchIndex {
+					//	logger.Printf("DEBUG Node[%v] Term[%v] Index[%v] matchIndex[%v]", rf.me, rf.currentTerm, index, matchIndex)
+					if index == rf.me {
+						continue
+					}
 					if matchIndex >= N {
 						cnt++
 					}
 				}
 				if cnt > len(rf.peers)/2 {
+					logger.Printf("LEADER Node[%v] Term[%v] Find max N[%v]", rf.me, rf.currentTerm, N)
 					break
 				}
 			}
+			newCommitIndex := N
 			for ; N > rf.commitIndex; N-- {
-				//TODO 提交日志
+				//提交日志
+				logger.Printf("LEADER Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, N+1, rf.logs[N].Command)
+				rf.applyCh <- ApplyMsg{
+					CommandValid: true,
+					Command:      rf.logs[N].Command,
+					CommandIndex: N + 1, //+1是因为和test中从1开始计数保持一直
+				}
 			}
+			rf.commitIndex = newCommitIndex
 		} else {
 			//日志复制失败
-			rf.nextIndex[server]--
+			rf.nextIndex[server] = min(args.PrevLogIndex+1, rf.nextIndex[server])
 		}
 		rf.mu.Unlock()
 		return
@@ -615,6 +651,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.commitIndex = -1 //表示从未提交过日志
+	rf.applyCh = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.electionTimer = time.NewTimer(randomElectionTimeout())
