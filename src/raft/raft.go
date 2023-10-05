@@ -156,7 +156,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 
 	//在prevLogIndex位置entry的term与leader不同
-	if args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+	if args.PrevLogIndex >= 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
 		reply.Term, reply.Success = rf.currentTerm, false
 		logger.Printf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because PrevLogTerm %v != rf.logs[args.PrevLogIndex].Term %v", rf.me, args, args.LeaderId, args.PrevLogIndex, len(rf.logs))
 		return
@@ -341,7 +341,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-// the service using Raft (e.g. a k/v server) wants to start
+// Start the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
 // server isn't the leader, returns false. otherwise start the
 // agreement and return immediately. there is no guarantee that this
@@ -354,11 +354,15 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
-
 	// Your code here (2B).
+	LogEntry := LogEntry{
+		Term:    rf.currentTerm,
+		Command: command,
+	}
+	rf.logs = append(rf.logs, LogEntry)
+	index := len(rf.logs) - 1
+	term := rf.currentTerm
+	isLeader := rf.state == LEADER
 
 	return index, term, isLeader
 }
@@ -410,8 +414,22 @@ func (rf *Raft) ticker() {
 //heartbeat 同步发送心跳给指定的server
 func (rf *Raft) heartbeat(server int) {
 	//logger.Printf("%d->%d\n", rf.me, server)
-	args := AppendEntriesArgs{LeaderId: rf.me}
+	args := AppendEntriesArgs{PrevLogTerm: rf.currentTerm, PrevLogIndex: -1, LeaderId: rf.me}
 	reply := AppendEntriesReply{}
+	logFlag := false
+	rf.mu.Lock()
+	//检查是否需要传入log
+	if len(rf.logs)-1 >= rf.nextIndex[server] {
+		logFlag = true
+		args.PrevLogIndex = rf.nextIndex[server] - 1
+		length := len(rf.logs) - rf.nextIndex[server]
+		args.Entries = make([]LogEntry, length)
+		for i := 0; i < length; i++ {
+			args.Entries = append(args.Entries, rf.logs[i+rf.nextIndex[server]])
+		}
+		logger.Printf("Node[%v] term[%v] 向[%v] 追加日志,nextIndex[server]:%v,len(logs):%v,logs:[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], len(rf.logs), args.Entries)
+	}
+	rf.mu.Unlock()
 	rf.mu.RLock()
 	args.Term = rf.currentTerm
 	rf.mu.RUnlock()
@@ -425,6 +443,38 @@ func (rf *Raft) heartbeat(server int) {
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 		rf.electionTimer.Reset(randomElectionTimeout())
+		rf.mu.Unlock()
+		return
+	}
+	if logFlag {
+		//发生了log的复制
+		if reply.Success {
+			//日志复制成功
+			//新的nextIndex为原来的nextIndex[server](PrevLogIndex+1)+len(args.Entries)
+			rf.nextIndex[server] = args.PrevLogIndex + len(args.Entries) + 1
+			rf.matchIndex[server] = rf.nextIndex[server] - 1
+			//查找是否存在可以提交的日志N(过半matchIndex[i] >= N)
+			//这里可以快排的方法快速求出中位数，再看中位数是否符合要求[nLog(n)],为避免增加复杂度，暂且采用简单的方法
+			N := len(rf.logs) - 1 //最大不会超过日志的最大索引
+			for ; N > rf.commitIndex; N-- {
+				//最小也要比上一次提交的小
+				cnt := 0
+				for _, matchIndex := range rf.matchIndex {
+					if matchIndex >= N {
+						cnt++
+					}
+				}
+				if cnt > len(rf.peers)/2 {
+					break
+				}
+			}
+			for ; N > rf.commitIndex; N-- {
+				//TODO 提交日志
+			}
+		} else {
+			//日志复制失败
+			rf.nextIndex[server]--
+		}
 		rf.mu.Unlock()
 		return
 	}
