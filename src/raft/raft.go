@@ -179,33 +179,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		followLogger.Printf("Node [%v] receives unexpected AppendEntriesRequest %v from Node [%v] because PrevLogTerm %v != rf.logs[args.PrevLogIndex].Term %v", rf.me, args, args.LeaderId, args.PrevLogTerm, len(rf.logs))
 		return
 	}
-	logIndex := args.PrevLogIndex + 1 //写入新日志的第一个索引位置
 	//日志复制
-	if args.PrevLogTerm != -1 && logIndex <= len(rf.logs)-1 {
-		//日志冲突，leader强一致，删除不同的所有日志
-		//切片为左开右闭原则
-		dropLogs := rf.logs[logIndex:len(rf.logs)]
-		followLogger.Printf("Node[%v] Term[%v] 删除不一致日志，起始索引为:%v, log:%v， logIndex[%v] len(rf.log)[%v]", rf.me, rf.currentTerm, logIndex, dropLogs, logIndex, len(rf.logs))
-		rf.logs = rf.logs[:logIndex]
-	}
-	for i := 0; i < len(args.Entries); i++ {
-		//日志添加
-		followLogger.Printf("Node[%v] Term[%v] 追加日志，索引为:%v, 内容为%v", rf.me, rf.currentTerm, logIndex+i, args.Entries[i].Command)
-		rf.logs = append(rf.logs, args.Entries[i])
+	for i, entry := range args.Entries {
+		index := args.PrevLogIndex + i + 1
+		if index > len(rf.logs)-1 || rf.logs[index].Term != entry.Term {
+			//之前没有这个索引位置，或者发生了冲突
+			rf.logs = rf.logs[:index]
+			//这里为什么不能直接添加，而是批量添加（打散处理后）：会导致在冲突或缺失的情况下无法正确维护日志的连续性，可能会产生不一致的状态
+			rf.logs = append(rf.logs, append([]LogEntry{}, args.Entries[i:]...)...)
+			followLogger.Printf("Node[%v] Term[%v] 追加日志，索引为:%v, 内容为%v", rf.me, rf.currentTerm, index, entry)
+			break
+		}
 	}
 	//leaderCommit > commitIndex，令 commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		lastCommitIndex := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
-		//同步提交日志
+		//提交日志
+		var applyMsgs []ApplyMsg
 		for i := lastCommitIndex + 1; i <= rf.commitIndex; i++ {
 			followLogger.Printf("Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, i+1, rf.logs[i].Command)
-			rf.applyCh <- ApplyMsg{
+			applyMsg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logs[i].Command,
 				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
 			}
+			applyMsgs = append(applyMsgs, applyMsg)
+
 		}
+		go func(applyMsgs []ApplyMsg, rf *Raft) {
+			//同步组装，异步发送
+			for _, applyMsg := range applyMsgs {
+				rf.applyCh <- applyMsg
+			}
+		}(applyMsgs, rf)
 	}
 	//设置返回值
 	reply.Success = true
@@ -321,6 +328,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			//最后一条日志的任期号更大，则不投票，但是会根据term更新自己状态
 			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.logs[len(rf.logs)-1].Term, args.LastLogTerm)
 			reply.Term = args.Term
+			rf.votedFor = -1
 			reply.VoteGranted = false
 			return
 		}
@@ -328,6 +336,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			//日志条目更多，也不更新
 			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为日志条目[%v]比候选者日志条目[%v]更多", rf.me, rf.currentTerm, args.CandidateId, args.Term, len(rf.logs)-1, args.LastLogIndex)
 			reply.VoteGranted = false
+			rf.votedFor = -1
 			reply.Term = args.Term
 			return
 		}
@@ -434,7 +443,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	logger.Println(rf.me, "死掉了")
+	logger.Println(rf.me, "死掉了", rf)
 }
 
 func (rf *Raft) killed() bool {
@@ -483,7 +492,7 @@ func (rf *Raft) heartbeat(server int) {
 	//检查是否需要传入log
 	//debugger.Printf("Node[%v] 检查是否需要向Node[%v] 传入日志，len(rf.logs)-1：[%v] >= rf.nextIndex[server]：[%v]", rf.me, server, len(rf.logs)-1, rf.nextIndex[server])
 	rf.appendLog(server, &args)
-	leaderLogger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,nextIndex[server]:%v,len(logs):%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], len(rf.logs), len(args.Entries), args.Entries)
+	leaderLogger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,LeaderCommit[%v], nextIndex[server]:%v,len(logs):%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, args.LeaderCommit, rf.nextIndex[server], len(rf.logs), len(args.Entries), args.Entries)
 	rf.mu.Unlock()
 	rf.mu.RLock()
 	args.Term = rf.currentTerm
@@ -529,15 +538,23 @@ func (rf *Raft) heartbeat(server int) {
 				break
 			}
 		}
+		var applyMsgs []ApplyMsg
 		for i := rf.commitIndex + 1; i <= N; i++ {
 			//提交日志
 			leaderLogger.Printf("Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, i+1, rf.logs[i].Command)
-			rf.applyCh <- ApplyMsg{
+			applyMsg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logs[i].Command,
 				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
 			}
+			applyMsgs = append(applyMsgs, applyMsg)
 		}
+		go func(applyMsgs []ApplyMsg, rf *Raft) {
+			//同步组装，异步发送
+			for _, applyMsg := range applyMsgs {
+				rf.applyCh <- applyMsg
+			}
+		}(applyMsgs, rf)
 		rf.commitIndex = N
 	} else {
 		//日志复制失败
@@ -696,7 +713,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ticker goroutine to start elections
-	logger.Println(me, "初始化完成")
+	logger.Println(me, "初始化完成", rf)
 	go rf.ticker()
 	return rf
 }

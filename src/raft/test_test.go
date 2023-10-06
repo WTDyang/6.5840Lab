@@ -497,6 +497,14 @@ func TestRejoin2B(t *testing.T) {
 	cfg.end()
 }
 
+//func TestBackup2BLoop(t *testing.T) {
+//	for i := 1; i <= 100; i++ {
+//		debugger.Printf("loooooooooooooooooop %v 开启第[%v]次测试", time.Now(), i)
+//		fmt.Printf("loooooooooooooooooop %v\n 开启第[%v]次测试", time.Now(), i)
+//		TestBackup2B(t)
+//		time.Sleep(2 * time.Second)
+//	}
+//}
 func TestBackup2B(t *testing.T) {
 	servers := 5
 	cfg := make_config(t, servers, false, false)
