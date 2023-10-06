@@ -21,7 +21,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -97,7 +96,7 @@ type ApplyMsg struct {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.RWMutex        // Lock to protect shared access to this peer's state;change from Mutex to RWMutex,in order to increase efficiency
+	mu        LogRWMutex          // Lock to protect shared access to this peer's state;change from Mutex to RWMutex,in order to increase efficiency
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
@@ -166,6 +165,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//只要接收到正常的心跳就可以重置计时器，更新任期信息
 	reply.Term = rf.currentTerm
 	rf.electionTimer.Reset(randomElectionTimeout())
+	followLogger.Printf("Node[%v] term[%v] 心跳刷新", rf.me, args.Term)
 	//follower 在prevLogIndex 位置没有entry
 	if args.PrevLogIndex >= len(rf.logs) {
 		reply.Term, reply.Success = rf.currentTerm, false
@@ -198,12 +198,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//提交日志
 		var applyMsgs []ApplyMsg
 		for i := lastCommitIndex + 1; i <= rf.commitIndex; i++ {
-			followLogger.Printf("Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, i+1, rf.logs[i].Command)
 			applyMsg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logs[i].Command,
 				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
 			}
+			followLogger.Printf("Node[%v] Term[%v],准备提交日志 index[%v],ApplyMsg:%v", rf.me, rf.currentTerm, i, applyMsg)
 			applyMsgs = append(applyMsgs, applyMsg)
 
 		}
@@ -498,11 +498,12 @@ func (rf *Raft) heartbeat(server int) {
 	args.Term = rf.currentTerm
 	rf.mu.RUnlock()
 	if ok := rf.sendAppendEntries(server, &args, &reply); !ok {
-		leaderLogger.Printf("Node[%d]心跳丢失->Node[%d]\n", rf.me, server)
+		//leaderLogger.Printf("Node[%d]心跳丢失->Node[%d]\n", rf.me, server)
 		return
 	}
 	rf.mu.Lock()
 	if reply.Term > rf.currentTerm {
+		leaderLogger.Printf("Node[%v] Term[%v] 变更为follower节点，因为reply.Term[%v] > rf.currentTerm[%v]", rf.me, rf.currentTerm, reply.Term, rf.currentTerm)
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
 		rf.state = FOLLOWER
@@ -541,12 +542,12 @@ func (rf *Raft) heartbeat(server int) {
 		var applyMsgs []ApplyMsg
 		for i := rf.commitIndex + 1; i <= N; i++ {
 			//提交日志
-			leaderLogger.Printf("Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, i+1, rf.logs[i].Command)
 			applyMsg := ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logs[i].Command,
 				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
 			}
+			followLogger.Printf("Node[%v] Term[%v],准备提交日志 index[%v],ApplyMsg:%v", rf.me, rf.currentTerm, i, applyMsg)
 			applyMsgs = append(applyMsgs, applyMsg)
 		}
 		go func(applyMsgs []ApplyMsg, rf *Raft) {
@@ -629,7 +630,7 @@ func (rf *Raft) elections() {
 			continue
 		}
 		//异步拉票
-		//logger.Printf("%d拉票于%d，权重为%d\n", rf.me, i, rf.currentTerm)
+		candidateLogger.Printf("Node[%v] Term[%v] 拉票于[%v]", rf.me, rf.currentTerm, i)
 		go func(i int) {
 			reply := RequestVoteReply{}
 			if ok := rf.sendRequestVote(i, &requestVoteArg, &reply); !ok {
@@ -706,6 +707,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.state = FOLLOWER //初始化为follower节点
 
+	rf.mu = LogRWMutex{}
 	// Your initialization code here (2A, 2B, 2C).
 	rf.electionTimer = time.NewTimer(randomElectionTimeout())
 	rf.heartbeatTimer = time.NewTimer(randomElectionTimeout())
