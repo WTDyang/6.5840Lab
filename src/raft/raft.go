@@ -43,6 +43,7 @@ var followLogger *log.Logger
 var leaderLogger *log.Logger
 var candidateLogger *log.Logger
 var debugger *log.Logger //debugger会在控制台输出，用于关键打点，谨慎使用
+var lockLogger *log.Logger
 
 func init() {
 	//初始化方法
@@ -64,6 +65,7 @@ func init() {
 	candidateLogger = log.New(io.MultiWriter(writer), "[CANDIDATE] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 	//debugger = log.New(io.MultiWriter(writer, os.Stdout), "[DEBUG] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 	debugger = log.New(io.MultiWriter(writer), "[DEBUG] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
+	lockLogger = log.New(io.MultiWriter(writer), "[LOCK] ", log.Ldate|log.Lmicroseconds)
 }
 
 // LogEntry 日志实体结构
