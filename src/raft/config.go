@@ -355,7 +355,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	fmt.Printf("connect(%d)\n", i)
+	debugger.Printf("connect(%d)\n", i)
 
 	cfg.connected[i] = true
 

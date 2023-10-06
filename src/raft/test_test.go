@@ -471,27 +471,27 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-
+	debugger.Printf("TEST KEY STEP 原leader[%v] 断开连接", leader1)
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
 	cfg.rafts[leader1].Start(104)
-
+	debugger.Printf("TEST KEY STEP leader[%v] 传入三个指令", leader1)
 	// new leader commits, also for index=2
 	cfg.one(103, 2, true)
 
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
-
+	debugger.Printf("TEST KEY STEP 新leader[%v] 断开连接", leader2)
 	// old leader connected again
 	cfg.connect(leader1)
-
+	debugger.Printf("TEST KEY STEP 原leader[%v] 重新连接", leader1)
 	cfg.one(104, 2, true)
 
 	// all together now
 	cfg.connect(leader2)
-
+	debugger.Printf("TEST KEY STEP 新leader[%v] 重新连接", leader2)
 	cfg.one(105, servers, true)
 
 	cfg.end()

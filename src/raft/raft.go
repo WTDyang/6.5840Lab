@@ -63,6 +63,7 @@ func init() {
 	followLogger = log.New(io.MultiWriter(writer), "[FOLLOWER] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 	leaderLogger = log.New(io.MultiWriter(writer), "[LEADER] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 	candidateLogger = log.New(io.MultiWriter(writer), "[CANDIDATE] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
+	//debugger = log.New(io.MultiWriter(writer, os.Stdout), "[DEBUG] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 	debugger = log.New(io.MultiWriter(writer), "[DEBUG] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 }
 
@@ -323,7 +324,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = false
 			return
 		}
-		if len(rf.logs)-1 > args.LastLogIndex {
+		if rf.logs[len(rf.logs)-1].Term == args.LastLogTerm && len(rf.logs)-1 > args.LastLogIndex {
 			//日志条目更多，也不更新
 			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为日志条目[%v]比候选者日志条目[%v]更多", rf.me, rf.currentTerm, args.CandidateId, args.Term, len(rf.logs)-1, args.LastLogIndex)
 			reply.VoteGranted = false
