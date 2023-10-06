@@ -242,7 +242,7 @@ func TestLeaderFailure2B(t *testing.T) {
 	// disconnect the first leader.
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-	logger.Printf("TestLeaderFailure2B KEY STEP: Node[%v] 下线", leader1)
+	debugger.Printf("TestLeaderFailure2B KEY STEP: Node[%v] 下线", leader1)
 	// the remaining followers should elect
 	// a new leader.
 	cfg.one(102, servers-1, false)
@@ -252,7 +252,7 @@ func TestLeaderFailure2B(t *testing.T) {
 	// disconnect the new leader.
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
-	logger.Printf("TestLeaderFailure2B KEY STEP: Node[%v] 下线", leader2)
+	debugger.Printf("TestLeaderFailure2B KEY STEP: Node[%v] 下线", leader2)
 	// submit a command to each server.
 	for i := 0; i < servers; i++ {
 		cfg.rafts[i].Start(104)
@@ -283,7 +283,7 @@ func TestFailAgree2B(t *testing.T) {
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
-
+	debugger.Printf("TEST KEY STEP disconnect one follower[%v] from the network", (leader+1)%servers)
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
 	cfg.one(102, servers-1, false)
@@ -294,6 +294,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
+	debugger.Printf("TEST KEY STEP re-connect follower[%v] from the network", (leader+1)%servers)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree

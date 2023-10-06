@@ -170,6 +170,7 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 				err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
 			}
 			if err_msg != "" {
+				debugger.Printf(err_msg)
 				log.Fatalf("apply error: %v", err_msg)
 				cfg.applyErr[i] = err_msg
 				// keep reading after error so that Raft doesn't block
@@ -575,16 +576,16 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				}
 			}
 		}
-		logger.Printf("KEY STEP:find the leader[%v]", index)
+		debugger.Printf("KEY STEP:find the leader,the index of log is[%v]", index)
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				logger.Printf("KEY VARIABLE: nd[%v], cmd1[%v] expectedServers[%v]", nd, cmd1, expectedServers)
+				debugger.Printf("KEY VARIABLE: nd[%v], cmd1[%v] expectedServers[%v]", nd, cmd1, expectedServers)
 				if nd > 0 && nd >= expectedServers {
-					logger.Printf("KEY VARIABLE: cmd1[%v], cmd[%v]", cmd1, cmd)
+					debugger.Printf("KEY VARIABLE: cmd1[%v], cmd[%v]", cmd1, cmd)
 					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.

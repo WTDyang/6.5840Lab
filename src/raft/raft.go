@@ -28,18 +28,22 @@ import (
 	"6.5840/labrpc"
 )
 
-type STATE int
+type STATE string
 
 const (
-	FOLLOWER STATE = iota
-	CANDIDATE
-	LEADER
+	FOLLOWER  STATE = "FOLLOWER"
+	CANDIDATE STATE = "CANDIDATE"
+	LEADER    STATE = "LEADER"
 )
 
 // HEARTBEAT_INTERVAL 心跳间隔50ms
 const HEARTBEAT_INTERVAL = 50 * time.Millisecond
 
 var logger *log.Logger
+var followLogger *log.Logger
+var leaderLogger *log.Logger
+var candidateLogger *log.Logger
+var debugger *log.Logger
 
 func init() {
 	//初始化方法
@@ -48,12 +52,18 @@ func init() {
 	if err != nil {
 		log.Fatalf("create file log.txt failed: %v", err)
 	}
-	title := "----------" + time.Now().String() + "------------\n"
+	title := "|--------------------------------------------------------------------------------------------|\n" +
+		"|--------------------" + time.Now().String() + "---------------------|\n" +
+		"|--------------------------------------------------------------------------------------------|\n"
 	_, err = writer.WriteString(title)
 	if err != nil {
 		log.Fatalf("write the title failed: %v", err)
 	}
-	logger = log.New(io.MultiWriter(writer), "", log.Lshortfile|log.Ldate|log.Lmicroseconds)
+	logger = log.New(io.MultiWriter(writer), "[COMMON] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
+	followLogger = log.New(io.MultiWriter(writer), "[FOLLOWER] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
+	leaderLogger = log.New(io.MultiWriter(writer), "[LEADER] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
+	candidateLogger = log.New(io.MultiWriter(writer), "[CANDIDATE] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
+	debugger = log.New(io.MultiWriter(writer), "[DEBUG] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 }
 
 // LogEntry 日志实体结构
@@ -128,6 +138,7 @@ type AppendEntriesReply struct {
 
 // AppendEntries Invoked by leader to replicate log entries; also used as heartbeat
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+	logger.Printf("Node[%v] Term[%v] 接收到Node[%v] Term[%v]心跳", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.killed() {
@@ -146,7 +157,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		// If RPC request contains term T > currentTerm
 		// 更新状态
-		//logger.Printf("%d屈服于%d(2),term:(%d,%d)\n", rf.me, args.LeaderId, rf.currentTerm, args.Term)
+		logger.Printf("Node[%v] term[%v] 接收到心跳[%v],term:[%v],成为FOLLOWER\n", rf.me, args.Term, args.LeaderId, rf.currentTerm)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = FOLLOWER
@@ -157,14 +168,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//follower 在prevLogIndex 位置没有entry
 	if args.PrevLogIndex >= len(rf.logs) {
 		reply.Term, reply.Success = rf.currentTerm, false
-		logger.Printf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because prevLogIndex %v >= logs.len %v", rf.me, args, args.LeaderId, args.PrevLogIndex, len(rf.logs))
+		followLogger.Printf("Node[%v] receives unexpected AppendEntriesRequest %v from Node[%v] because prevLogIndex %v >= logs.len %v", rf.me, args, args.LeaderId, args.PrevLogIndex, len(rf.logs))
 		return
 	}
 
 	//在prevLogIndex位置entry的term与leader不同
 	if args.PrevLogIndex >= 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
 		reply.Term, reply.Success = rf.currentTerm, false
-		logger.Printf("{Node %v} receives unexpected AppendEntriesRequest %v from {Node %v} because PrevLogTerm %v != rf.logs[args.PrevLogIndex].Term %v", rf.me, args, args.LeaderId, args.PrevLogTerm, len(rf.logs))
+		followLogger.Printf("Node [%v] receives unexpected AppendEntriesRequest %v from Node [%v] because PrevLogTerm %v != rf.logs[args.PrevLogIndex].Term %v", rf.me, args, args.LeaderId, args.PrevLogTerm, len(rf.logs))
 		return
 	}
 	logIndex := args.PrevLogIndex + 1 //写入新日志的第一个索引位置
@@ -173,12 +184,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		//日志冲突，leader强一致，删除不同的所有日志
 		//切片为左开右闭原则
 		dropLogs := rf.logs[logIndex:len(rf.logs)]
-		logger.Printf("FOLLOWER Node[%v] Term[%v] 删除不一致日志，起始索引为:%v, log:%v， logIndex[%v] len(rf.log)[%v]", rf.me, rf.currentTerm, logIndex, dropLogs, logIndex, len(rf.logs))
+		followLogger.Printf("Node[%v] Term[%v] 删除不一致日志，起始索引为:%v, log:%v， logIndex[%v] len(rf.log)[%v]", rf.me, rf.currentTerm, logIndex, dropLogs, logIndex, len(rf.logs))
 		rf.logs = rf.logs[:logIndex]
 	}
 	for i := 0; i < len(args.Entries); i++ {
 		//日志添加
-		logger.Printf("FOLLOWER Node[%v] Term[%v] 追加日志，索引为:%v, 内容为%v", rf.me, rf.currentTerm, logIndex+i, args.Entries[i].Command)
+		followLogger.Printf("Node[%v] Term[%v] 追加日志，索引为:%v, 内容为%v", rf.me, rf.currentTerm, logIndex+i, args.Entries[i].Command)
 		rf.logs = append(rf.logs, args.Entries[i])
 	}
 	//leaderCommit > commitIndex，令 commitIndex = min(leaderCommit, index of last new entry)
@@ -187,7 +198,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
 		//同步提交日志
 		for i := lastCommitIndex + 1; i <= rf.commitIndex; i++ {
-			logger.Printf("FOLLOWER Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, i+1, rf.logs[i].Command)
+			followLogger.Printf("Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, i+1, rf.logs[i].Command)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
 				Command:      rf.logs[i].Command,
@@ -288,6 +299,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		// Reply false if term < currentTerm
+		logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为args.Term[%v] < rf.currentTerm[%v]", rf.me, rf.currentTerm, args.CandidateId, args.Term, args.Term, rf.currentTerm)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -295,15 +307,35 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term > rf.currentTerm {
 		// If RPC request contains term T > currentTerm:set currentTerm = T, convert to follower
+		logger.Printf("Node[%v] 更新为follow节点，因为args.Term[%v] > rf.currentTerm[%v]", rf.me, args.Term, rf.currentTerm)
 		rf.currentTerm = args.Term
 		//这里赋值为-1，下面判断是否为-1即可排除这种可能
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 	}
+	//为了保证安全性，首先检验日志的合法性
+	//候选人应当包含所有已提交的日志条目
+	if len(rf.logs) > 0 {
+		if rf.logs[len(rf.logs)-1].Term > args.LastLogTerm {
+			//最后一条日志的任期号更大，则不投票，但是会根据term更新自己状态
+			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.logs[len(rf.logs)-1].Term, args.LastLogTerm)
+			reply.Term = args.Term
+			reply.VoteGranted = false
+			return
+		}
+		if len(rf.logs)-1 > args.LastLogIndex {
+			//日志条目更多，也不更新
+			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为日志条目[%v]比候选者日志条目[%v]更多", rf.me, rf.currentTerm, args.CandidateId, args.Term, len(rf.logs)-1, args.LastLogIndex)
+			reply.VoteGranted = false
+			reply.Term = args.Term
+			return
+		}
+	}
 
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		// If votedFor is null or candidateId, grant vote; otherwise reject
 		//已投票
+		logger.Printf("Node[%v] Term[%v] 已经投票给其他节点[%v],因此拒绝投票给Node[%v] Term[%v]", rf.me, rf.currentTerm, rf.votedFor, args.CandidateId, args.Term)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -312,7 +344,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// grant vote to candidate, reset election timer
 	rf.electionTimer.Reset(randomElectionTimeout())
 	rf.votedFor = args.CandidateId
-
+	logger.Printf("Node[%v] 投票给Node[%v]", rf.me, rf.votedFor)
 	reply.VoteGranted = true
 	reply.Term = rf.currentTerm
 }
@@ -385,7 +417,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.logs = append(rf.logs, LogEntry)
-	logger.Printf("Node[%v]传入命令[%v],index:%v,term:%v,isLeader:%v", rf.me, command, index, term, isLeader)
+	leaderLogger.Printf("Node[%v]传入命令[%v],index:%v,term:%v,isLeader:%v", rf.me, command, index, term, isLeader)
 	return index, term, isLeader
 }
 
@@ -416,7 +448,7 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			rf.mu.Lock()
-			logger.Printf("Node[%d]超时,身份是[%d]\n", rf.me, rf.state)
+			logger.Printf("Node[%v] Term[%v]超时,身份是[%v]\n", rf.me, rf.currentTerm, rf.state)
 			if rf.state == LEADER {
 				//if is a leader:beak
 				rf.mu.Unlock()
@@ -432,33 +464,31 @@ func (rf *Raft) ticker() {
 		//time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
+func (rf *Raft) appendLog(server int, args *AppendEntriesArgs) {
+	//向请求中添加日志
+	args.PrevLogIndex = rf.nextIndex[server] - 1
+	if args.PrevLogIndex >= 0 {
+		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+	}
+	args.Entries = rf.logs[rf.nextIndex[server]:]
+}
 
 //heartbeat 同步发送心跳给指定的server
 func (rf *Raft) heartbeat(server int) {
 	//logger.Printf("%d->%d\n", rf.me, server)
 	args := AppendEntriesArgs{LeaderCommit: rf.commitIndex, PrevLogTerm: -1, PrevLogIndex: -1, LeaderId: rf.me}
 	reply := AppendEntriesReply{}
-	logFlag := false
 	rf.mu.Lock()
 	//检查是否需要传入log
-	if len(rf.logs)-1 >= rf.nextIndex[server] {
-		logFlag = true
-		args.PrevLogIndex = rf.nextIndex[server] - 1
-		if args.PrevLogIndex >= 0 {
-			args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
-		}
-		length := len(rf.logs) - rf.nextIndex[server]
-		for i := 0; i < length; i++ {
-			args.Entries = append([]LogEntry{}, rf.logs[i+rf.nextIndex[server]])
-		}
-		logger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,nextIndex[server]:%v,len(logs):%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], len(rf.logs), len(args.Entries), args.Entries)
-	}
+	//debugger.Printf("Node[%v] 检查是否需要向Node[%v] 传入日志，len(rf.logs)-1：[%v] >= rf.nextIndex[server]：[%v]", rf.me, server, len(rf.logs)-1, rf.nextIndex[server])
+	rf.appendLog(server, &args)
+	leaderLogger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,nextIndex[server]:%v,len(logs):%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], len(rf.logs), len(args.Entries), args.Entries)
 	rf.mu.Unlock()
 	rf.mu.RLock()
 	args.Term = rf.currentTerm
 	rf.mu.RUnlock()
 	if ok := rf.sendAppendEntries(server, &args, &reply); !ok {
-		logger.Printf("Node[%d]心跳丢失->[%d]\n", rf.me, server)
+		leaderLogger.Printf("Node[%d]心跳丢失->Node[%d]\n", rf.me, server)
 		return
 	}
 	rf.mu.Lock()
@@ -470,52 +500,49 @@ func (rf *Raft) heartbeat(server int) {
 		rf.mu.Unlock()
 		return
 	}
-	if logFlag {
-		//发生了log的复制
-		if reply.Success {
-			logger.Printf("LEADER Node[%v] Term[%v] 日志复制成功,server[%v],log:%v", rf.me, rf.currentTerm, server, args.Entries)
-			//日志复制成功
-			//新的nextIndex为原来的nextIndex[server](PrevLogIndex+1)+len(args.Entries)
-			//由于是个高并发问题，可能这里已经被更新了
-			rf.nextIndex[server] = max(rf.nextIndex[server], args.PrevLogIndex+len(args.Entries)+1)
-			rf.matchIndex[server] = rf.nextIndex[server] - 1
-			//查找是否存在可以提交的日志N(过半matchIndex[i] >= N)
-			//这里可以快排的方法快速求出中位数，再看中位数是否符合要求[nLog(n)],为避免增加复杂度，暂且采用简单的方法
-			N := len(rf.logs) - 1 //最大不会超过日志的最大索引
-			for ; N > rf.commitIndex; N-- {
-				//最小也要比上一次提交的小
-				cnt := 1
-				for index, matchIndex := range rf.matchIndex {
-					//	logger.Printf("DEBUG Node[%v] Term[%v] Index[%v] matchIndex[%v]", rf.me, rf.currentTerm, index, matchIndex)
-					if index == rf.me {
-						continue
-					}
-					if matchIndex >= N {
-						cnt++
-					}
+	//发生了log的复制
+	if reply.Success {
+		leaderLogger.Printf("Node[%v] Term[%v] 日志复制成功,server[%v],log:%v", rf.me, rf.currentTerm, server, args.Entries)
+		//日志复制成功
+		//新的nextIndex为原来的nextIndex[server](PrevLogIndex+1)+len(args.Entries)
+		//由于是个高并发问题，可能这里已经被更新了
+		rf.nextIndex[server] = max(rf.nextIndex[server], args.PrevLogIndex+len(args.Entries)+1)
+		rf.matchIndex[server] = rf.nextIndex[server] - 1
+		//查找是否存在可以提交的日志N(过半matchIndex[i] >= N)
+		//这里可以快排的方法快速求出中位数，再看中位数是否符合要求[nLog(n)],为避免增加复杂度，暂且采用简单的方法
+		N := len(rf.logs) - 1 //最大不会超过日志的最大索引
+		for ; N > rf.commitIndex; N-- {
+			//最小也要比上一次提交的小
+			cnt := 1
+			for index, matchIndex := range rf.matchIndex {
+				//	logger.Printf("DEBUG Node[%v] Term[%v] Index[%v] matchIndex[%v]", rf.me, rf.currentTerm, index, matchIndex)
+				if index == rf.me {
+					continue
 				}
-				if cnt > len(rf.peers)/2 {
-					logger.Printf("LEADER Node[%v] Term[%v] Find max N[%v]", rf.me, rf.currentTerm, N)
-					break
+				if matchIndex >= N {
+					cnt++
 				}
 			}
-			newCommitIndex := N
-			for ; N > rf.commitIndex; N-- {
-				//提交日志
-				logger.Printf("LEADER Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, N+1, rf.logs[N].Command)
-				rf.applyCh <- ApplyMsg{
-					CommandValid: true,
-					Command:      rf.logs[N].Command,
-					CommandIndex: N + 1, //+1是因为和test中从1开始计数保持一直
-				}
+			if cnt > len(rf.peers)/2 {
+				leaderLogger.Printf("Node[%v] Term[%v] Find max N[%v]", rf.me, rf.currentTerm, N)
+				break
 			}
-			rf.commitIndex = newCommitIndex
-		} else {
-			//日志复制失败
-			rf.nextIndex[server] = min(args.PrevLogIndex+1, rf.nextIndex[server])
 		}
-		rf.mu.Unlock()
-		return
+		newCommitIndex := N
+		for ; N > rf.commitIndex; N-- {
+			//提交日志
+			leaderLogger.Printf("Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, N+1, rf.logs[N].Command)
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      rf.logs[N].Command,
+				CommandIndex: N + 1, //+1是因为和test中从1开始计数保持一直
+			}
+		}
+		rf.commitIndex = newCommitIndex
+	} else {
+		//日志复制失败
+		rf.nextIndex[server] = min(args.PrevLogIndex, rf.nextIndex[server])
+		leaderLogger.Printf("Node[%v] Term[%v] 日志复制失败，更新Node[%v] 的nextIndex为[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server])
 	}
 	rf.mu.Unlock()
 	return
@@ -525,7 +552,7 @@ func (rf *Raft) heartbeat(server int) {
 //leader的状态转化
 //定期发送心跳广播
 func (rf *Raft) startLeaderAction() {
-	logger.Printf("%d号成为leader\n", rf.me)
+	leaderLogger.Printf("Node[%v]号成为leader\n", rf.me)
 	rf.mu.Lock()
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
@@ -570,8 +597,12 @@ func (rf *Raft) elections() {
 	rf.electionTimer.Reset(randomElectionTimeout()) // Reset election timer
 	rf.mu.Unlock()
 
-	requestVoteArg := RequestVoteArgs{CandidateId: rf.me}
+	requestVoteArg := RequestVoteArgs{LastLogTerm: -1, LastLogIndex: -1, CandidateId: rf.me}
 	rf.mu.RLock()
+	if len(rf.logs) > 0 {
+		requestVoteArg.LastLogTerm = rf.logs[len(rf.logs)-1].Term
+		requestVoteArg.LastLogIndex = len(rf.logs) - 1
+	}
 	requestVoteArg.Term = rf.currentTerm
 	rf.mu.RUnlock()
 
@@ -592,7 +623,7 @@ func (rf *Raft) elections() {
 			}
 			rf.mu.Lock()
 			if reply.Term > rf.currentTerm {
-				logger.Printf("Node[%d]拉票于Node[%d]失败，变为follower\n", rf.me, i)
+				candidateLogger.Printf("Node[%d]拉票于Node[%d]失败，变为follower\n", rf.me, i)
 				// If RPC response contains term T > currentTerm:
 				// set currentTerm = T, convert to follower
 				rf.currentTerm = reply.Term
@@ -602,7 +633,7 @@ func (rf *Raft) elections() {
 				rf.mu.Unlock()
 				return
 			}
-			logger.Printf("Node[%d]拉票于Node[%d]成功，权重为%d\n", rf.me, i, rf.currentTerm)
+			candidateLogger.Printf("Node[%d]拉票于Node[%d]成功,结果为[%v]，任期为[%d]\n", rf.me, i, reply.VoteGranted, rf.currentTerm)
 			rf.mu.Unlock()
 			voteCh <- reply.VoteGranted
 		}(i)
@@ -656,6 +687,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.me = me
 	rf.commitIndex = -1 //表示从未提交过日志
 	rf.applyCh = applyCh
+	rf.state = FOLLOWER //初始化为follower节点
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.electionTimer = time.NewTimer(randomElectionTimeout())
