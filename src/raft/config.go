@@ -572,11 +572,11 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
+					debugger.Printf("KEY STEP:find the leader[%v],the index of log is[%v]", si, index)
 					break
 				}
 			}
 		}
-		debugger.Printf("KEY STEP:find the leader,the index of log is[%v]", index)
 		if index != -1 {
 			// somebody claimed to be the leader and to have
 			// submitted our command; wait a while for agreement.

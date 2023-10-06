@@ -43,7 +43,7 @@ var logger *log.Logger
 var followLogger *log.Logger
 var leaderLogger *log.Logger
 var candidateLogger *log.Logger
-var debugger *log.Logger
+var debugger *log.Logger //debugger会在控制台输出，用于关键打点，谨慎使用
 
 func init() {
 	//初始化方法
@@ -524,21 +524,20 @@ func (rf *Raft) heartbeat(server int) {
 				}
 			}
 			if cnt > len(rf.peers)/2 {
-				leaderLogger.Printf("Node[%v] Term[%v] Find max N[%v]", rf.me, rf.currentTerm, N)
+				leaderLogger.Printf("Node[%v] Term[%v] Find max N[%v],commitIndex[%v]", rf.me, rf.currentTerm, N, rf.commitIndex)
 				break
 			}
 		}
-		newCommitIndex := N
-		for ; N > rf.commitIndex; N-- {
+		for i := rf.commitIndex + 1; i <= N; i++ {
 			//提交日志
-			leaderLogger.Printf("Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, N+1, rf.logs[N].Command)
+			leaderLogger.Printf("Node[%v] Term[%v],提交日志 index[%v],Command:%v", rf.me, rf.currentTerm, i+1, rf.logs[i].Command)
 			rf.applyCh <- ApplyMsg{
 				CommandValid: true,
-				Command:      rf.logs[N].Command,
-				CommandIndex: N + 1, //+1是因为和test中从1开始计数保持一直
+				Command:      rf.logs[i].Command,
+				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
 			}
 		}
-		rf.commitIndex = newCommitIndex
+		rf.commitIndex = N
 	} else {
 		//日志复制失败
 		rf.nextIndex[server] = min(args.PrevLogIndex, rf.nextIndex[server])
