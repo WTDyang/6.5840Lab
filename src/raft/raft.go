@@ -185,8 +185,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//日志复制
 	for i, entry := range args.Entries {
 		index := args.PrevLogIndex + i + 1
-		if index > len(rf.logs)-1 || rf.logs[index].Term != entry.Term {
-			//之前没有这个索引位置，或者发生了冲突
+		if index > len(rf.logs)-1 || rf.logs[index].Term < entry.Term {
+			//之前没有这个索引位置，或者发生了冲突(保持term递增的趋势)
+			if index <= rf.commitIndex {
+				followLogger.Fatalf("Node[%v] 试图删除已提交的日志[%v] index[%v] commitIndex[%v]", rf.me, rf.logs, index, rf.commitIndex)
+			}
 			rf.logs = rf.logs[:index]
 			//这里为什么不能直接添加，而是批量添加（打散处理后）：会导致在冲突或缺失的情况下无法正确维护日志的连续性，可能会产生不一致的状态
 			rf.logs = append(rf.logs, append([]LogEntry{}, args.Entries[i:]...)...)
@@ -489,17 +492,18 @@ func (rf *Raft) appendLog(server int, args *AppendEntriesArgs) {
 //heartbeat 同步发送心跳给指定的server
 func (rf *Raft) heartbeat(server int) {
 	//logger.Printf("%d->%d\n", rf.me, server)
-	args := AppendEntriesArgs{LeaderCommit: rf.commitIndex, PrevLogTerm: -1, PrevLogIndex: -1, LeaderId: rf.me}
+	args := AppendEntriesArgs{Term: -1, LeaderCommit: rf.commitIndex, PrevLogTerm: -1, PrevLogIndex: -1, LeaderId: rf.me}
 	reply := AppendEntriesReply{}
 	rf.mu.Lock()
+	if rf.state == LEADER {
+		//最后一次检验，因为可能已经不是leader了但是拿到了锁，然后发送了错误的term请求
+		args.Term = rf.currentTerm
+	}
 	//检查是否需要传入log
 	//debugger.Printf("Node[%v] 检查是否需要向Node[%v] 传入日志，len(rf.logs)-1：[%v] >= rf.nextIndex[server]：[%v]", rf.me, server, len(rf.logs)-1, rf.nextIndex[server])
 	rf.appendLog(server, &args)
 	leaderLogger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,LeaderCommit[%v], nextIndex[server]:%v,len(logs):%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, args.LeaderCommit, rf.nextIndex[server], len(rf.logs), len(args.Entries), args.Entries)
 	rf.mu.Unlock()
-	rf.mu.RLock()
-	args.Term = rf.currentTerm
-	rf.mu.RUnlock()
 	if ok := rf.sendAppendEntries(server, &args, &reply); !ok {
 		//leaderLogger.Printf("Node[%d]心跳丢失->Node[%d]\n", rf.me, server)
 		return
@@ -550,7 +554,7 @@ func (rf *Raft) heartbeat(server int) {
 				Command:      rf.logs[i].Command,
 				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
 			}
-			followLogger.Printf("Node[%v] Term[%v],准备提交日志 index[%v],ApplyMsg:%v", rf.me, rf.currentTerm, i, applyMsg)
+			leaderLogger.Printf("Node[%v] Term[%v],准备提交日志 index[%v],ApplyMsg:%v", rf.me, rf.currentTerm, i, applyMsg)
 			applyMsgs = append(applyMsgs, applyMsg)
 		}
 		go func(applyMsgs []ApplyMsg, rf *Raft) {
@@ -573,7 +577,7 @@ func (rf *Raft) heartbeat(server int) {
 //leader的状态转化
 //定期发送心跳广播
 func (rf *Raft) startLeaderAction() {
-	leaderLogger.Printf("Node[%v]号成为leader\n", rf.me)
+	leaderLogger.Printf("Node[%v]号成为leader 状态为:%v\n", rf.me, rf)
 	rf.mu.Lock()
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))

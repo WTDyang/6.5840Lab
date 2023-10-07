@@ -8,7 +8,9 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
+import (
+	"testing"
+)
 import "fmt"
 import "time"
 import "math/rand"
@@ -501,7 +503,11 @@ func TestRejoin2B(t *testing.T) {
 //	for i := 1; i <= 100; i++ {
 //		debugger.Printf("loooooooooooooooooop %v 开启第[%v]次测试", time.Now(), i)
 //		fmt.Printf("loooooooooooooooooop %v\n 开启第[%v]次测试", time.Now(), i)
+//		file, _ := os.OpenFile("log.log", os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0755) //覆盖
+//		file.Close()
 //		TestBackup2B(t)
+//		debugger.Printf("测试完成")
+//
 //		time.Sleep(2 * time.Second)
 //	}
 //}
