@@ -175,28 +175,28 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//follower 在prevLogIndex 位置没有entry
 	if args.PrevLogIndex >= len(rf.logs) {
 		reply.Term, reply.Success = rf.currentTerm, false
-		followLogger.Printf("Node[%v] receives unexpected AppendEntriesRequest %v from Node[%v] because prevLogIndex %v >= logs.len %v", rf.me, args, args.LeaderId, args.PrevLogIndex, len(rf.logs))
+		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为prevLogIndex 位置没有entry prevLogIndex[%v] >= logs.len[%v]", rf.me, args.LeaderId, args.PrevLogIndex, len(rf.logs))
 		return
 	}
 
 	//在prevLogIndex位置entry的term与leader不同
 	if args.PrevLogIndex >= 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
 		reply.Term, reply.Success = rf.currentTerm, false
-		followLogger.Printf("Node [%v] receives unexpected AppendEntriesRequest %v from Node [%v] because PrevLogTerm %v != rf.logs[args.PrevLogIndex].Term %v", rf.me, args, args.LeaderId, args.PrevLogTerm, len(rf.logs))
+		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为在prevLogIndex位置entry的term与leader不同 PrevLogTerm[%v] != rf.logs[args.PrevLogIndex].Term[%v]", rf.me, args.LeaderId, args.PrevLogTerm, rf.logs[args.PrevLogIndex].Term)
 		return
 	}
 	//日志复制
 	for i, entry := range args.Entries {
 		index := args.PrevLogIndex + i + 1
-		if index > len(rf.logs)-1 || rf.logs[index].Term < entry.Term {
-			//之前没有这个索引位置，或者发生了冲突(保持term递增的趋势)
+		if index > len(rf.logs)-1 || rf.logs[index].Term != entry.Term {
+			//之前没有这个索引位置，或者发生了冲突(保持强一致性原则，只要冲突就与leader保持一直)
 			if index <= rf.commitIndex {
 				followLogger.Fatalf("Node[%v] 试图删除已提交的日志[%v] index[%v] commitIndex[%v]", rf.me, rf.logs, index, rf.commitIndex)
 			}
 			rf.logs = rf.logs[:index]
 			//这里为什么不能直接添加，而是批量添加（打散处理后）：会导致在冲突或缺失的情况下无法正确维护日志的连续性，可能会产生不一致的状态
 			rf.logs = append(rf.logs, append([]LogEntry{}, args.Entries[i:]...)...)
-			followLogger.Printf("Node[%v] Term[%v] 追加日志，索引为:%v, 内容为%v", rf.me, rf.currentTerm, index, entry)
+			followLogger.Printf("Node[%v] Term[%v] 追加来自Node[%v]的日志，索引为:%v, 内容为%v", rf.me, rf.currentTerm, args.LeaderId, index, entry)
 			break
 		}
 	}
@@ -213,7 +213,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				Command:      rf.logs[i].Command,
 				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
 			}
-			followLogger.Printf("Node[%v] Term[%v],准备提交日志 index[%v],ApplyMsg:%v", rf.me, rf.currentTerm, i, applyMsg)
+			followLogger.Printf("Node[%v] Term[%v],准备提交日志 index[%v],logTerm[%v] ApplyMsg:%v", rf.me, rf.currentTerm, i, rf.logs[i].Term, applyMsg)
 			applyMsgs = append(applyMsgs, applyMsg)
 
 		}
@@ -525,6 +525,11 @@ func (rf *Raft) heartbeat(server int) {
 		return
 	}
 	rf.mu.Lock()
+	if rf.state != LEADER {
+		logger.Printf("Node[%v] Term[%v] 收到发送给Node[%v]的延迟消息 但是已经不是leader身份 选择忽略", rf.me, rf.currentTerm, server)
+		rf.mu.Unlock()
+		return
+	}
 	if reply.Term > rf.currentTerm {
 		leaderLogger.Printf("Node[%v] Term[%v] 变更为follower节点，因为reply.Term[%v] > rf.currentTerm[%v]", rf.me, rf.currentTerm, reply.Term, rf.currentTerm)
 		rf.currentTerm = reply.Term
