@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.5840/labgob"
+	"bytes"
 	"io"
 	"log"
 	"os"
@@ -164,6 +166,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = FOLLOWER
+		rf.persist()
 	}
 	//只要接收到正常的心跳就可以重置计时器，更新任期信息
 	reply.Term = rf.currentTerm
@@ -197,6 +200,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 	}
+	rf.persist()
 	//leaderCommit > commitIndex，令 commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
 		lastCommitIndex := rf.commitIndex
@@ -247,14 +251,22 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	err := e.Encode(rf.currentTerm)
+	if err != nil {
+		return
+	}
+	err = e.Encode(rf.votedFor)
+	if err != nil {
+		return
+	}
+	err = e.Encode(rf.logs)
+	if err != nil {
+		return
+	}
+	data := w.Bytes()
+	rf.persister.Save(data, []byte{})
 }
 
 // restore previously persisted state.
@@ -262,19 +274,18 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var logs []LogEntry
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		panic("readPersist decode fail")
+	}
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.logs = logs
+	rf.persist()
 }
 
 // the service says it has created a snapshot that has
@@ -326,6 +337,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		//这里赋值为-1，下面判断是否为-1即可排除这种可能
 		rf.votedFor = -1
 		rf.state = FOLLOWER
+		rf.persist()
 	}
 	//为了保证安全性，首先检验日志的合法性
 	//候选人应当包含所有已提交的日志条目
@@ -335,6 +347,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.logs[len(rf.logs)-1].Term, args.LastLogTerm)
 			reply.Term = args.Term
 			rf.votedFor = -1
+			rf.persist()
 			reply.VoteGranted = false
 			return
 		}
@@ -343,6 +356,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为日志条目[%v]比候选者日志条目[%v]更多", rf.me, rf.currentTerm, args.CandidateId, args.Term, len(rf.logs)-1, args.LastLogIndex)
 			reply.VoteGranted = false
 			rf.votedFor = -1
+			rf.persist()
 			reply.Term = args.Term
 			return
 		}
@@ -360,6 +374,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// grant vote to candidate, reset election timer
 	rf.electionTimer.Reset(randomElectionTimeout())
 	rf.votedFor = args.CandidateId
+	rf.persist()
 	logger.Printf("Node[%v] 投票给Node[%v]", rf.me, rf.votedFor)
 	reply.VoteGranted = true
 	reply.Term = rf.currentTerm
@@ -433,6 +448,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.logs = append(rf.logs, LogEntry)
+	rf.persist()
 	leaderLogger.Printf("Node[%v]传入命令[%v],index:%v,term:%v,isLeader:%v", rf.me, command, index, term, isLeader)
 	return index, term, isLeader
 }
@@ -514,6 +530,7 @@ func (rf *Raft) heartbeat(server int) {
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
 		rf.state = FOLLOWER
+		rf.persist()
 		rf.electionTimer.Reset(randomElectionTimeout())
 		rf.mu.Unlock()
 		return
@@ -617,8 +634,9 @@ func (rf *Raft) startLeaderAction() {
 //elections the leader
 func (rf *Raft) elections() {
 	rf.mu.Lock()
-	rf.currentTerm++                                // Increment currentTerm
-	rf.votedFor = rf.me                             // Vote for self
+	rf.currentTerm++    // Increment currentTerm
+	rf.votedFor = rf.me // Vote for self
+	rf.persist()
 	rf.electionTimer.Reset(randomElectionTimeout()) // Reset election timer
 	rf.mu.Unlock()
 
@@ -654,6 +672,7 @@ func (rf *Raft) elections() {
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
 				rf.state = FOLLOWER
+				rf.persist()
 				//voteCh <- reply.VoteGranted
 				rf.mu.Unlock()
 				return
