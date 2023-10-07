@@ -10,29 +10,30 @@ import (
 )
 
 type LogRWMutex struct {
-	mu  sync.RWMutex
-	uid int64
+	mu     sync.RWMutex
+	uid    int64
+	raftId int
 }
 
 func (l *LogRWMutex) Lock() {
 	uid := generateUID()
 	l.mu.Lock()
 	l.uid = uid
-	lockLogger.Printf("%s LOCK[%v] LOCK", getFileLocation(), uid)
+	lockLogger.Printf("%s Node[%v] LOCK[%v] LOCK", getFileLocation(), l.raftId, uid)
 }
 
 func (l *LogRWMutex) Unlock() {
-	lockLogger.Printf("%s LOCK[%v] UNLOCK", getFileLocation(), l.uid)
+	lockLogger.Printf("%s Node[%v] LOCK[%v] UNLOCK", getFileLocation(), l.raftId, l.uid)
 	l.mu.Unlock()
 }
 func (l *LogRWMutex) RLock() {
 	uid := generateUID()
 	l.mu.RLock()
 	l.uid = uid
-	lockLogger.Printf("%s LOCK[%v] ReadLOCK", getFileLocation(), uid)
+	lockLogger.Printf("%s Node[%v] RLOCK[%v] LOCK", getFileLocation(), l.raftId, uid)
 }
 func (l *LogRWMutex) RUnlock() {
-	lockLogger.Printf("%s LOCK[%v] ReadUNLOCK", getFileLocation(), l.uid)
+	lockLogger.Printf("%s Node[%v] RLOCK[%v] UNLOCK", getFileLocation(), l.raftId, l.uid)
 	l.mu.RUnlock()
 }
 func getFileLocation() string {

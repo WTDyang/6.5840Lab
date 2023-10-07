@@ -48,7 +48,8 @@ var lockLogger *log.Logger
 func init() {
 	//初始化方法
 	//日志系统初始化
-	writer, err := os.OpenFile("log.txt", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0755)
+	//writer, err := os.OpenFile("log.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0755) //追加模式
+	writer, err := os.OpenFile("log.log", os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0755) //覆盖
 	if err != nil {
 		log.Fatalf("create file log.txt failed: %v", err)
 	}
@@ -515,7 +516,7 @@ func (rf *Raft) heartbeat(server int) {
 	}
 	//发生了log的复制
 	if reply.Success {
-		leaderLogger.Printf("Node[%v] Term[%v] 日志复制成功,server[%v],log:%v", rf.me, rf.currentTerm, server, args.Entries)
+		leaderLogger.Printf("Node[%v] Term[%v] 向server[%v] 日志复制成功,log:%v", rf.me, rf.currentTerm, server, args.Entries)
 		//日志复制成功
 		//新的nextIndex为原来的nextIndex[server](PrevLogIndex+1)+len(args.Entries)
 		//由于是个高并发问题，可能这里已经被更新了
@@ -709,7 +710,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.state = FOLLOWER //初始化为follower节点
 
-	rf.mu = LogRWMutex{}
+	rf.mu = LogRWMutex{raftId: me}
 	// Your initialization code here (2A, 2B, 2C).
 	rf.electionTimer = time.NewTimer(randomElectionTimeout())
 	rf.heartbeatTimer = time.NewTimer(randomElectionTimeout())
