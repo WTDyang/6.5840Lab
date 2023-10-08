@@ -569,6 +569,14 @@ func (rf *Raft) heartbeat(server int) {
 			}
 		}
 		var applyMsgs []ApplyMsg
+		if N < 0 || rf.logs[N].Term != rf.currentTerm {
+			//根据Rules for Servers leaders的第四条，直接跳过
+			if N >= 0 {
+				leaderLogger.Printf("Node[%v] Term[%v] 虽然发现max N[%v] 但logs[N].Term[%v] != currentTerm[%v]", rf.me, rf.currentTerm, N, rf.logs[N].Term, rf.currentTerm)
+			}
+			rf.mu.Unlock()
+			return
+		}
 		for i := rf.commitIndex + 1; i <= N; i++ {
 			//提交日志
 			applyMsg := ApplyMsg{
