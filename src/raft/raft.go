@@ -139,6 +139,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  //currentTerm,for leader to update itself
 	Success bool //true if follower contained entry matching prevLogIndex and prevLogTerm
+
+	ConflictLogTerm  int //the term of log which is conflict
+	ConflictLogIndex int //the first log which one it's term equals to conflict one
 }
 
 // AppendEntries Invoked by leader to replicate log entries; also used as heartbeat
@@ -175,6 +178,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//follower 在prevLogIndex 位置没有entry
 	if args.PrevLogIndex >= len(rf.logs) {
 		reply.Term, reply.Success = rf.currentTerm, false
+		reply.ConflictLogTerm = -1 //设置成非法数字，这样强制主机从reply.ConflictLogIndex开始同步
+		reply.ConflictLogIndex = len(rf.logs)
 		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为prevLogIndex 位置没有entry prevLogIndex[%v] >= logs.len[%v]", rf.me, args.LeaderId, args.PrevLogIndex, len(rf.logs))
 		return
 	}
@@ -182,6 +187,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//在prevLogIndex位置entry的term与leader不同
 	if args.PrevLogIndex >= 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
 		reply.Term, reply.Success = rf.currentTerm, false
+		reply.ConflictLogTerm = rf.logs[args.PrevLogIndex].Term
+		for i := args.PrevLogIndex; i > rf.commitIndex && rf.logs[i].Term == rf.logs[args.PrevLogIndex].Term; i-- {
+			args.PrevLogIndex = i //设置成第一个符合条件的值（将会是被覆盖掉的）
+		}
+		reply.ConflictLogIndex = len(rf.logs)
 		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为在prevLogIndex位置entry的term与leader不同 PrevLogTerm[%v] != rf.logs[args.PrevLogIndex].Term[%v]", rf.me, args.LeaderId, args.PrevLogTerm, rf.logs[args.PrevLogIndex].Term)
 		return
 	}
@@ -205,6 +215,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		lastCommitIndex := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		rf.persist()
 		//提交日志
 		var applyMsgs []ApplyMsg
 		for i := lastCommitIndex + 1; i <= rf.commitIndex; i++ {
@@ -594,9 +605,17 @@ func (rf *Raft) heartbeat(server int) {
 			}
 		}(applyMsgs, rf)
 		rf.commitIndex = N
+		rf.persist()
 	} else {
 		//日志复制失败
-		rf.nextIndex[server] = min(args.PrevLogIndex, rf.nextIndex[server])
+		newPrevLogIndex := args.PrevLogIndex
+		for newPrevLogIndex > reply.ConflictLogIndex {
+			if rf.logs[newPrevLogIndex].Term == reply.ConflictLogTerm {
+				break //寻找第一个相同Term的日志
+			}
+			newPrevLogIndex--
+		}
+		rf.nextIndex[server] = min(newPrevLogIndex, rf.nextIndex[server])
 		leaderLogger.Printf("Node[%v] Term[%v] 日志复制失败，更新Node[%v] 的nextIndex为[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server])
 	}
 	rf.mu.Unlock()
