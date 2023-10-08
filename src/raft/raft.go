@@ -140,8 +140,9 @@ type AppendEntriesReply struct {
 	Term    int  //currentTerm,for leader to update itself
 	Success bool //true if follower contained entry matching prevLogIndex and prevLogTerm
 
-	ConflictLogTerm  int //the term of log which is conflict
-	ConflictLogIndex int //the first log which one it's term equals to conflict one
+	Conflict         bool //true if conflict happened
+	ConflictLogTerm  int  //the term of log which is conflict
+	ConflictLogIndex int  //the first log which one it's term equals to conflict one
 }
 
 // AppendEntries Invoked by leader to replicate log entries; also used as heartbeat
@@ -180,6 +181,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term, reply.Success = rf.currentTerm, false
 		reply.ConflictLogTerm = -1 //设置成非法数字，这样强制主机从reply.ConflictLogIndex开始同步
 		reply.ConflictLogIndex = len(rf.logs)
+		reply.Conflict = true
 		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为prevLogIndex 位置没有entry prevLogIndex[%v] >= logs.len[%v]", rf.me, args.LeaderId, args.PrevLogIndex, len(rf.logs))
 		return
 	}
@@ -188,10 +190,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex >= 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
 		reply.Term, reply.Success = rf.currentTerm, false
 		reply.ConflictLogTerm = rf.logs[args.PrevLogIndex].Term
+		reply.ConflictLogIndex = args.PrevLogIndex
 		for i := args.PrevLogIndex; i > rf.commitIndex && rf.logs[i].Term == rf.logs[args.PrevLogIndex].Term; i-- {
-			args.PrevLogIndex = i //设置成第一个符合条件的值（将会是被覆盖掉的）
+			reply.ConflictLogIndex = i //设置成第一个符合条件的值（将会是被覆盖掉的）
 		}
-		reply.ConflictLogIndex = len(rf.logs)
+		reply.Conflict = true
 		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为在prevLogIndex位置entry的term与leader不同 PrevLogTerm[%v] != rf.logs[args.PrevLogIndex].Term[%v]", rf.me, args.LeaderId, args.PrevLogTerm, rf.logs[args.PrevLogIndex].Term)
 		return
 	}
@@ -476,7 +479,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	logger.Println(rf.me, "死掉了", rf)
+	logger.Printf("Node[%v] 死掉了 属性为:%v", rf.me, rf)
 }
 
 func (rf *Raft) killed() bool {
@@ -606,7 +609,7 @@ func (rf *Raft) heartbeat(server int) {
 		}(applyMsgs, rf)
 		rf.commitIndex = N
 		rf.persist()
-	} else {
+	} else if reply.Conflict {
 		//日志复制失败
 		newPrevLogIndex := args.PrevLogIndex
 		for newPrevLogIndex > reply.ConflictLogIndex {
@@ -616,7 +619,7 @@ func (rf *Raft) heartbeat(server int) {
 			newPrevLogIndex--
 		}
 		rf.nextIndex[server] = min(newPrevLogIndex, rf.nextIndex[server])
-		leaderLogger.Printf("Node[%v] Term[%v] 日志复制失败，更新Node[%v] 的nextIndex为[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server])
+		leaderLogger.Printf("Node[%v] Term[%v] 日志复制失败 更新Node[%v] 的nextIndex为[%v] ConflictLogIndex[%v] ConflictLogTerm[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], reply.ConflictLogIndex, reply.ConflictLogTerm)
 	}
 	rf.mu.Unlock()
 	return
