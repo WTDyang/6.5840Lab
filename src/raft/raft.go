@@ -116,13 +116,12 @@ type Raft struct {
 	electionTimer  *time.Timer //timeout
 	heartbeatTimer *time.Timer //heartbeatTimer
 
-	commitIndex     int           //index of the highest log entry know to bew committed(init to 0)
-	lastApplied     int           //index of the highest log entry applied to state machine(init to 0)
-	nextIndex       []int         //for each server,index of the next log entry to send to that server(initialized to leader last log index +1)
-	matchIndex      []int         //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
-	applyCh         chan ApplyMsg //chan to apply
-	commitFlag      chan struct{} //用来触发提交日志
-	lastCommitIndex int           //提交提交的日志的索引
+	commitIndex int           //index of the highest log entry know to bew committed(init to 0)
+	lastApplied int           //index of the highest log entry applied to state machine(init to 0)
+	nextIndex   []int         //for each server,index of the next log entry to send to that server(initialized to leader last log index +1)
+	matchIndex  []int         //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
+	applyCh     chan ApplyMsg //chan to apply
+	commitFlag  chan struct{} //用来触发提交日志
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 }
@@ -221,8 +220,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
 		rf.persist()
-		if rf.lastCommitIndex != rf.commitIndex {
-			followLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastCommitIndex+1, rf.commitIndex)
+		if rf.lastApplied != rf.commitIndex {
+			followLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastApplied+1, rf.commitIndex)
 			go func() {
 				rf.commitFlag <- struct{}{} //开启一次提交检查
 			}()
@@ -241,8 +240,8 @@ func (rf *Raft) commandLog() {
 			//启动一次提交检查
 			var applyMsgs []ApplyMsg
 			rf.mu.Lock()
-			logger.Printf("Node[%v] Term[%v] 开启一次提交检查 lastCommitIndex[%v] CommitIndex[%v]", rf.me, rf.currentTerm, rf.lastCommitIndex, rf.commitIndex)
-			for i := rf.lastCommitIndex + 1; i <= rf.commitIndex; i++ {
+			logger.Printf("Node[%v] Term[%v] 开启一次提交检查 lastApplied[%v] CommitIndex[%v]", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				applyMsg := ApplyMsg{
 					CommandValid: true,
 					Command:      rf.logs[i].Command,
@@ -250,7 +249,7 @@ func (rf *Raft) commandLog() {
 				}
 				applyMsgs = append(applyMsgs, applyMsg)
 			}
-			rf.lastCommitIndex = rf.commitIndex
+			rf.lastApplied = rf.commitIndex
 			rf.mu.Unlock()
 			go func(applyMsgs []ApplyMsg, rf *Raft) {
 				//同步组装，异步发送
@@ -615,8 +614,8 @@ func (rf *Raft) heartbeat(server int) {
 		}
 		rf.commitIndex = N
 		rf.persist()
-		if rf.lastCommitIndex != rf.commitIndex {
-			leaderLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastCommitIndex+1, rf.commitIndex)
+		if rf.lastApplied != rf.commitIndex {
+			leaderLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastApplied+1, rf.commitIndex)
 			go func() {
 				rf.commitFlag <- struct{}{} //开启一次提交检查
 			}()
@@ -720,7 +719,6 @@ func (rf *Raft) elections() {
 				rf.votedFor = -1
 				rf.state = FOLLOWER
 				rf.persist()
-				//voteCh <- reply.VoteGranted
 				rf.mu.Unlock()
 				return
 			}
@@ -738,7 +736,8 @@ func (rf *Raft) elections() {
 		rf.mu.RLock()
 		state := rf.state
 		rf.mu.RUnlock()
-		if state != CANDIDATE {
+		if state != CANDIDATE || rf.currentTerm > requestVoteArg.Term {
+			//推出了选举或者是rpc延迟导致失效
 			break
 		}
 		if voteGranted {
@@ -777,7 +776,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.commitIndex = -1 //表示从未提交过日志
-	rf.lastCommitIndex = -1
+	rf.lastApplied = -1
 	rf.applyCh = applyCh
 	rf.state = FOLLOWER //初始化为follower节点
 	rf.commitFlag = make(chan struct{})
