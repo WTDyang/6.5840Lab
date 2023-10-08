@@ -74,6 +74,7 @@ func init() {
 // LogEntry 日志实体结构
 type LogEntry struct {
 	Term    int         // 任期
+	Index   int         //接受时的索引
 	Command interface{} // 命令
 }
 
@@ -115,11 +116,13 @@ type Raft struct {
 	electionTimer  *time.Timer //timeout
 	heartbeatTimer *time.Timer //heartbeatTimer
 
-	commitIndex int           //index of the highest log entry know to bew committed(init to 0)
-	lastApplied int           //index of the highest log entry applied to state machine(init to 0)
-	nextIndex   []int         //for each server,index of the next log entry to send to that server(initialized to leader last log index +1)
-	matchIndex  []int         //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
-	applyCh     chan ApplyMsg //chan to apply
+	commitIndex     int           //index of the highest log entry know to bew committed(init to 0)
+	lastApplied     int           //index of the highest log entry applied to state machine(init to 0)
+	nextIndex       []int         //for each server,index of the next log entry to send to that server(initialized to leader last log index +1)
+	matchIndex      []int         //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
+	applyCh         chan ApplyMsg //chan to apply
+	commitFlag      chan struct{} //用来触发提交日志
+	lastCommitIndex int           //提交提交的日志的索引
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 }
@@ -216,30 +219,49 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.persist()
 	//leaderCommit > commitIndex，令 commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
-		lastCommitIndex := rf.commitIndex
 		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
 		rf.persist()
-		//提交日志
-		var applyMsgs []ApplyMsg
-		for i := lastCommitIndex + 1; i <= rf.commitIndex; i++ {
-			applyMsg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.logs[i].Command,
-				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
-			}
-			followLogger.Printf("Node[%v] Term[%v],准备提交日志 index[%v],logTerm[%v] ApplyMsg:%v", rf.me, rf.currentTerm, i, rf.logs[i].Term, applyMsg)
-			applyMsgs = append(applyMsgs, applyMsg)
-
+		if rf.lastCommitIndex != rf.commitIndex {
+			followLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastCommitIndex+1, rf.commitIndex)
+			go func() {
+				rf.commitFlag <- struct{}{} //开启一次提交检查
+			}()
 		}
-		go func(applyMsgs []ApplyMsg, rf *Raft) {
-			//同步组装，异步发送
-			for _, applyMsg := range applyMsgs {
-				rf.applyCh <- applyMsg
-			}
-		}(applyMsgs, rf)
 	}
 	//设置返回值
 	reply.Success = true
+}
+
+//顺序提交日志
+func (rf *Raft) commandLog() {
+	//只要没有被回收就一直提交日志
+	for !rf.killed() {
+		select {
+		case <-rf.commitFlag:
+			//启动一次提交检查
+			var applyMsgs []ApplyMsg
+			rf.mu.Lock()
+			logger.Printf("Node[%v] Term[%v] 开启一次提交检查 lastCommitIndex[%v] CommitIndex[%v]", rf.me, rf.currentTerm, rf.lastCommitIndex, rf.commitIndex)
+			for i := rf.lastCommitIndex + 1; i <= rf.commitIndex; i++ {
+				applyMsg := ApplyMsg{
+					CommandValid: true,
+					Command:      rf.logs[i].Command,
+					CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
+				}
+				applyMsgs = append(applyMsgs, applyMsg)
+			}
+			rf.lastCommitIndex = rf.commitIndex
+			rf.mu.Unlock()
+			go func(applyMsgs []ApplyMsg, rf *Raft) {
+				//同步组装，异步发送
+				for _, applyMsg := range applyMsgs {
+					logger.Printf("Node[%v] Term[%v],准备提交日志 ApplyMsg:%v", rf.me, rf.currentTerm, applyMsg)
+					rf.applyCh <- applyMsg
+				}
+			}(applyMsgs, rf)
+
+		}
+	}
 }
 
 // return currentTerm and whether this server
@@ -458,6 +480,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	LogEntry := LogEntry{
+		Index:   index,
 		Term:    rf.currentTerm,
 		Command: command,
 	}
@@ -582,7 +605,6 @@ func (rf *Raft) heartbeat(server int) {
 				break
 			}
 		}
-		var applyMsgs []ApplyMsg
 		if N < 0 || rf.logs[N].Term != rf.currentTerm {
 			//根据Rules for Servers leaders的第四条，直接跳过
 			if N >= 0 {
@@ -591,24 +613,14 @@ func (rf *Raft) heartbeat(server int) {
 			rf.mu.Unlock()
 			return
 		}
-		for i := rf.commitIndex + 1; i <= N; i++ {
-			//提交日志
-			applyMsg := ApplyMsg{
-				CommandValid: true,
-				Command:      rf.logs[i].Command,
-				CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
-			}
-			leaderLogger.Printf("Node[%v] Term[%v],准备提交日志 index[%v],ApplyMsg:%v", rf.me, rf.currentTerm, i, applyMsg)
-			applyMsgs = append(applyMsgs, applyMsg)
-		}
-		go func(applyMsgs []ApplyMsg, rf *Raft) {
-			//同步组装，异步发送
-			for _, applyMsg := range applyMsgs {
-				rf.applyCh <- applyMsg
-			}
-		}(applyMsgs, rf)
 		rf.commitIndex = N
 		rf.persist()
+		if rf.lastCommitIndex != rf.commitIndex {
+			leaderLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastCommitIndex+1, rf.commitIndex)
+			go func() {
+				rf.commitFlag <- struct{}{} //开启一次提交检查
+			}()
+		}
 	} else if reply.Conflict {
 		//日志复制失败
 		newPrevLogIndex := args.PrevLogIndex
@@ -765,18 +777,19 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 	rf.commitIndex = -1 //表示从未提交过日志
+	rf.lastCommitIndex = -1
 	rf.applyCh = applyCh
 	rf.state = FOLLOWER //初始化为follower节点
-
+	rf.commitFlag = make(chan struct{})
 	rf.mu = LogRWMutex{raftId: me}
 	// Your initialization code here (2A, 2B, 2C).
 	rf.electionTimer = time.NewTimer(randomElectionTimeout())
 	rf.heartbeatTimer = time.NewTimer(randomElectionTimeout())
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	go rf.commandLog()
 	// start ticker goroutine to start elections
-	logger.Println(me, "初始化完成", rf)
 	go rf.ticker()
+	logger.Println(me, "初始化完成", rf)
 	return rf
 }
