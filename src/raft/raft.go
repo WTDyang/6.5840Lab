@@ -122,6 +122,10 @@ type Raft struct {
 	matchIndex  []int         //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
 	applyCh     chan ApplyMsg //chan to apply
 	commitFlag  chan struct{} //用来触发提交日志
+
+	logNum            int //日志的总数
+	lastIncludedIndex int //已提交的日志最后一条的索引
+	lastIncludedTerm  int //已提交日志最后一条的term
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 }
@@ -145,6 +149,19 @@ type AppendEntriesReply struct {
 	Conflict         bool //true if conflict happened
 	ConflictLogTerm  int  //the term of log which is conflict
 	ConflictLogIndex int  //the first log which one it's term equals to conflict one
+}
+
+func (rf *Raft) getLog(index int) LogEntry {
+	n := index - rf.lastIncludedIndex
+	if n == -1 {
+		logger.Printf("Node[%v] Term[%v] 的日志[%v] 已被裁剪，返回日志不包含日志内容", rf.me, rf.currentTerm, index)
+		return LogEntry{
+			Term:    rf.lastIncludedTerm,
+			Index:   rf.lastIncludedIndex,
+			Command: nil,
+		}
+	}
+	return rf.logs[n]
 }
 
 // AppendEntries Invoked by leader to replicate log entries; also used as heartbeat
@@ -179,38 +196,40 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.electionTimer.Reset(randomElectionTimeout())
 	followLogger.Printf("Node[%v] term[%v] 心跳刷新", rf.me, args.Term)
 	//follower 在prevLogIndex 位置没有entry
-	if args.PrevLogIndex >= len(rf.logs) {
+	if args.PrevLogIndex >= rf.logNum {
 		reply.Term, reply.Success = rf.currentTerm, false
 		reply.ConflictLogTerm = -1 //设置成非法数字，这样强制主机从reply.ConflictLogIndex开始同步
-		reply.ConflictLogIndex = len(rf.logs)
+		reply.ConflictLogIndex = rf.logNum
 		reply.Conflict = true
-		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为prevLogIndex 位置没有entry prevLogIndex[%v] >= logs.len[%v]", rf.me, args.LeaderId, args.PrevLogIndex, len(rf.logs))
+		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为prevLogIndex 位置没有entry prevLogIndex[%v] >= logs.len[%v]", rf.me, args.LeaderId, args.PrevLogIndex, rf.logNum)
 		return
 	}
 
 	//在prevLogIndex位置entry的term与leader不同
-	if args.PrevLogIndex >= 0 && args.PrevLogTerm != rf.logs[args.PrevLogIndex].Term {
+	if args.PrevLogIndex >= 0 && args.PrevLogTerm != rf.getLog(args.PrevLogIndex).Term {
 		reply.Term, reply.Success = rf.currentTerm, false
-		reply.ConflictLogTerm = rf.logs[args.PrevLogIndex].Term
+		reply.ConflictLogTerm = rf.getLog(args.PrevLogIndex).Term
 		reply.ConflictLogIndex = args.PrevLogIndex
-		for i := args.PrevLogIndex; i > rf.commitIndex && rf.logs[i].Term == rf.logs[args.PrevLogIndex].Term; i-- {
+		for i := args.PrevLogIndex; i > rf.commitIndex && rf.getLog(i).Term == rf.getLog(args.PrevLogIndex).Term; i-- {
 			reply.ConflictLogIndex = i //设置成第一个符合条件的值（将会是被覆盖掉的）
 		}
 		reply.Conflict = true
-		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为在prevLogIndex位置entry的term与leader不同 PrevLogTerm[%v] != rf.logs[args.PrevLogIndex].Term[%v]", rf.me, args.LeaderId, args.PrevLogTerm, rf.logs[args.PrevLogIndex].Term)
+		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为在prevLogIndex位置entry的term与leader不同 PrevLogTerm[%v] != rf.getLog(args.PrevLogIndex).Term[%v]", rf.me, args.LeaderId, args.PrevLogTerm, rf.getLog(args.PrevLogIndex).Term)
 		return
 	}
 	//日志复制
 	for i, entry := range args.Entries {
-		index := args.PrevLogIndex + i + 1
-		if index > len(rf.logs)-1 || rf.logs[index].Term != entry.Term {
+		index := args.PrevLogIndex + i + 1 - rf.lastIncludedIndex
+		if index > rf.logNum-1 || rf.logs[index].Term != entry.Term {
 			//之前没有这个索引位置，或者发生了冲突(保持强一致性原则，只要冲突就与leader保持一直)
 			if index <= rf.commitIndex {
 				followLogger.Fatalf("Node[%v] 试图删除已提交的日志[%v] index[%v] commitIndex[%v]", rf.me, rf.logs, index, rf.commitIndex)
 			}
+			lastLogNum := len(rf.logs)
 			rf.logs = rf.logs[:index]
 			//这里为什么不能直接添加，而是批量添加（打散处理后）：会导致在冲突或缺失的情况下无法正确维护日志的连续性，可能会产生不一致的状态
 			rf.logs = append(rf.logs, append([]LogEntry{}, args.Entries[i:]...)...)
+			rf.logNum = rf.logNum + len(rf.logs) - lastLogNum
 			followLogger.Printf("Node[%v] Term[%v] 追加来自Node[%v]的日志，索引为:%v, 内容为%v", rf.me, rf.currentTerm, args.LeaderId, index, entry)
 			break
 		}
@@ -218,7 +237,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.persist()
 	//leaderCommit > commitIndex，令 commitIndex = min(leaderCommit, index of last new entry)
 	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+		rf.commitIndex = min(args.LeaderCommit, rf.logNum-1)
 		rf.persist()
 		if rf.lastApplied != rf.commitIndex {
 			followLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastApplied+1, rf.commitIndex)
@@ -244,7 +263,7 @@ func (rf *Raft) commandLog() {
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				applyMsg := ApplyMsg{
 					CommandValid: true,
-					Command:      rf.logs[i].Command,
+					Command:      rf.getLog(i).Command,
 					CommandIndex: i + 1, //+1是因为和test中从1开始计数保持一直
 				}
 				applyMsgs = append(applyMsgs, applyMsg)
@@ -300,6 +319,18 @@ func (rf *Raft) persist() {
 	if err != nil {
 		return
 	}
+	err = e.Encode(rf.lastIncludedIndex)
+	if err != nil {
+		return
+	}
+	err = e.Encode(rf.lastIncludedTerm)
+	if err != nil {
+		return
+	}
+	err = e.Encode(rf.logNum)
+	if err != nil {
+		return
+	}
 	data := w.Bytes()
 	rf.persister.Save(data, []byte{})
 }
@@ -314,13 +345,18 @@ func (rf *Raft) readPersist(data []byte) {
 	var currentTerm int
 	var votedFor int
 	var logs []LogEntry
-	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+	var lastIncludedIndex int
+	var lastIncludedTerm int
+	var logNum int
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil || d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil || d.Decode(&logNum) != nil {
 		panic("readPersist decode fail")
 	}
 	rf.currentTerm = currentTerm
 	rf.votedFor = votedFor
 	rf.logs = logs
-	rf.persist()
+	rf.lastIncludedIndex = lastIncludedIndex
+	rf.lastIncludedTerm = lastIncludedTerm
+	rf.logNum = logNum
 }
 
 // the service says it has created a snapshot that has
@@ -376,19 +412,19 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	//为了保证安全性，首先检验日志的合法性
 	//候选人应当包含所有已提交的日志条目
-	if len(rf.logs) > 0 {
-		if rf.logs[len(rf.logs)-1].Term > args.LastLogTerm {
+	if rf.logNum > 0 {
+		if rf.getLog(rf.logNum-1).Term > args.LastLogTerm {
 			//最后一条日志的任期号更大，则不投票，但是会根据term更新自己状态
-			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.logs[len(rf.logs)-1].Term, args.LastLogTerm)
+			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.getLog(rf.logNum-1).Term, args.LastLogTerm)
 			reply.Term = args.Term
 			rf.votedFor = -1
 			rf.persist()
 			reply.VoteGranted = false
 			return
 		}
-		if rf.logs[len(rf.logs)-1].Term == args.LastLogTerm && len(rf.logs)-1 > args.LastLogIndex {
+		if rf.getLog(rf.logNum-1).Term == args.LastLogTerm && rf.logNum-1 > args.LastLogIndex {
 			//日志条目更多，也不更新
-			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为日志条目[%v]比候选者日志条目[%v]更多", rf.me, rf.currentTerm, args.CandidateId, args.Term, len(rf.logs)-1, args.LastLogIndex)
+			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为日志条目[%v]比候选者日志条目[%v]更多", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.logNum-1, args.LastLogIndex)
 			reply.VoteGranted = false
 			rf.votedFor = -1
 			rf.persist()
@@ -470,7 +506,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	rf.mu.RLock()
 	defer rf.mu.RUnlock()
-	index := len(rf.logs) + 1
+	index := rf.logNum + 1
 	term := rf.currentTerm
 	isLeader := rf.state == LEADER
 	if !isLeader {
@@ -484,6 +520,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	}
 	rf.logs = append(rf.logs, LogEntry)
+	rf.logNum++
 	rf.persist()
 	leaderLogger.Printf("Node[%v]传入命令[%v],index:%v,term:%v,isLeader:%v", rf.me, command, index, term, isLeader)
 	return index, term, isLeader
@@ -536,9 +573,9 @@ func (rf *Raft) appendLog(server int, args *AppendEntriesArgs) {
 	//向请求中添加日志
 	args.PrevLogIndex = rf.nextIndex[server] - 1
 	if args.PrevLogIndex >= 0 {
-		args.PrevLogTerm = rf.logs[args.PrevLogIndex].Term
+		args.PrevLogTerm = rf.getLog(args.PrevLogIndex).Term
 	}
-	args.Entries = rf.logs[rf.nextIndex[server]:]
+	args.Entries = rf.logs[rf.nextIndex[server]-rf.lastIncludedTerm:]
 }
 
 //heartbeat 同步发送心跳给指定的server
@@ -552,9 +589,9 @@ func (rf *Raft) heartbeat(server int) {
 		args.Term = rf.currentTerm
 	}
 	//检查是否需要传入log
-	//debugger.Printf("Node[%v] 检查是否需要向Node[%v] 传入日志，len(rf.logs)-1：[%v] >= rf.nextIndex[server]：[%v]", rf.me, server, len(rf.logs)-1, rf.nextIndex[server])
+	//debugger.Printf("Node[%v] 检查是否需要向Node[%v] 传入日志，rf.logNum-1：[%v] >= rf.nextIndex[server]：[%v]", rf.me, server, rf.logNum-1, rf.nextIndex[server])
 	rf.appendLog(server, &args)
-	leaderLogger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,LeaderCommit[%v], nextIndex[server]:%v,len(logs):%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, args.LeaderCommit, rf.nextIndex[server], len(rf.logs), len(args.Entries), args.Entries)
+	leaderLogger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,LeaderCommit[%v], nextIndex[server]:%v,rf.logNum:%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, args.LeaderCommit, rf.nextIndex[server], rf.logNum, len(args.Entries), args.Entries)
 	rf.mu.Unlock()
 	if ok := rf.sendAppendEntries(server, &args, &reply); !ok {
 		//leaderLogger.Printf("Node[%d]心跳丢失->Node[%d]\n", rf.me, server)
@@ -586,7 +623,7 @@ func (rf *Raft) heartbeat(server int) {
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
 		//查找是否存在可以提交的日志N(过半matchIndex[i] >= N)
 		//这里可以快排的方法快速求出中位数，再看中位数是否符合要求[nLog(n)],为避免增加复杂度，暂且采用简单的方法
-		N := len(rf.logs) - 1 //最大不会超过日志的最大索引
+		N := rf.logNum - 1 //最大不会超过日志的最大索引
 		for ; N > rf.commitIndex; N-- {
 			//最小也要比上一次提交的小
 			cnt := 1
@@ -604,10 +641,10 @@ func (rf *Raft) heartbeat(server int) {
 				break
 			}
 		}
-		if N < 0 || rf.logs[N].Term != rf.currentTerm {
+		if N < 0 || rf.getLog(N).Term != rf.currentTerm {
 			//根据Rules for Servers leaders的第四条，直接跳过
 			if N >= 0 {
-				leaderLogger.Printf("Node[%v] Term[%v] 虽然发现max N[%v] 但logs[N].Term[%v] != currentTerm[%v]", rf.me, rf.currentTerm, N, rf.logs[N].Term, rf.currentTerm)
+				leaderLogger.Printf("Node[%v] Term[%v] 虽然发现max N[%v] 但logs[N].Term[%v] != currentTerm[%v]", rf.me, rf.currentTerm, N, rf.getLog(N).Term, rf.currentTerm)
 			}
 			rf.mu.Unlock()
 			return
@@ -624,7 +661,7 @@ func (rf *Raft) heartbeat(server int) {
 		//日志复制失败
 		newPrevLogIndex := args.PrevLogIndex
 		for newPrevLogIndex > reply.ConflictLogIndex {
-			if rf.logs[newPrevLogIndex].Term == reply.ConflictLogTerm {
+			if rf.getLog(newPrevLogIndex).Term == reply.ConflictLogTerm {
 				break //寻找第一个相同Term的日志
 			}
 			newPrevLogIndex--
@@ -640,11 +677,11 @@ func (rf *Raft) heartbeat(server int) {
 //leader的状态转化
 //定期发送心跳广播
 func (rf *Raft) startLeaderAction() {
-	leaderLogger.Printf("Node[%v]号成为leader 状态为:%v\n", rf.me, rf)
+	leaderLogger.Printf("Node[%v]号成为leader Term[%v] 状态为:%v\n", rf.me, rf.currentTerm, rf)
 	rf.mu.Lock()
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
-	nextIndexInit := len(rf.logs)
+	nextIndexInit := rf.logNum
 	//nextIndex 初始化为leader的log的最后一条索引+1
 	//matchIndex 初始化为0
 	for i := 0; i < len(rf.peers); i++ {
@@ -688,9 +725,9 @@ func (rf *Raft) elections() {
 
 	requestVoteArg := RequestVoteArgs{LastLogTerm: -1, LastLogIndex: -1, CandidateId: rf.me}
 	rf.mu.RLock()
-	if len(rf.logs) > 0 {
-		requestVoteArg.LastLogTerm = rf.logs[len(rf.logs)-1].Term
-		requestVoteArg.LastLogIndex = len(rf.logs) - 1
+	if rf.logNum > 0 {
+		requestVoteArg.LastLogTerm = rf.getLog(rf.logNum - 1).Term
+		requestVoteArg.LastLogIndex = rf.logNum - 1
 	}
 	requestVoteArg.Term = rf.currentTerm
 	rf.mu.RUnlock()
