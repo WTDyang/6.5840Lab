@@ -162,7 +162,7 @@ func (rf *Raft) getLog(index int) LogEntry {
 			Command: nil,
 		}
 	}
-	println(len(rf.logs), index, rf.lastIncludedIndex)
+	//println(len(rf.logs), index, rf.lastIncludedIndex)
 	return rf.logs[n]
 }
 func (rf *Raft) getRealIndex(index int) int {
@@ -380,16 +380,18 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	}
 	rf.snapshot = snapshot
 	lastIncludeIndex := rf.lastIncludedIndex
+	delEntries := []LogEntry{}
 	for cutIndex, val := range rf.logs {
-		if val.Index == index {
+		if val.Index-1 == index {
 			rf.lastIncludedIndex = index
 			rf.lastIncludedTerm = val.Term
 			//为了保证被gc
+			delEntries = rf.logs[:cutIndex+1]
 			rf.logs = append([]LogEntry{}, rf.logs[cutIndex+1:]...)
 			break
 		}
 	}
-	logger.Printf("Node[%v] Term[%v] 创建快照 from[%v](lastIncludedIndex+1) to[%v] LogNum[%v] len(logs)[%v] logs:%v", rf.me, rf.currentTerm, lastIncludeIndex+1, index, rf.logNum, len(rf.logs), rf.logs)
+	logger.Printf("Node[%v] Term[%v] 创建快照,压缩日志len[%v]: %v from[%v](lastIncludedIndex+1) to[%v] LogNum[%v] len(logs)[%v] logs:%v", rf.me, rf.currentTerm, len(delEntries), delEntries, lastIncludeIndex+1, index, rf.logNum, len(rf.logs), rf.logs)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if e.Encode(rf.currentTerm) != nil || e.Encode(rf.votedFor) != nil || e.Encode(rf.logs) != nil || e.Encode(rf.lastIncludedIndex) != nil || e.Encode(rf.lastIncludedTerm) != nil {
@@ -436,7 +438,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}(msg)
 	//日志压缩
 	for i := 0; i < len(rf.logs); i++ {
-		if rf.getLog(i).Index == args.LastIncludedIndex && rf.logs[i].Term <= args.LastIncludedTerm {
+		if rf.logs[i].Index-1 == args.LastIncludedIndex && rf.logs[i].Term <= args.LastIncludedTerm {
 			//找到提交位置
 			rf.lastIncludedTerm = args.LastIncludedTerm
 			rf.lastIncludedIndex = args.LastIncludedIndex
@@ -608,8 +610,8 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
-	rf.mu.RLock()
-	defer rf.mu.RUnlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	index := rf.logNum + 1
 	term := rf.currentTerm
 	isLeader := rf.state == LEADER
@@ -673,6 +675,42 @@ func (rf *Raft) ticker() {
 		//time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
+func (rf *Raft) checkAndCommit() {
+	N := rf.logNum - 1 //最大不会超过日志的最大索引
+	for ; N > rf.commitIndex; N-- {
+		//最小也要比上一次提交的小
+		cnt := 1
+		for index, matchIndex := range rf.matchIndex {
+			//	logger.Printf("DEBUG Node[%v] Term[%v] Index[%v] matchIndex[%v]", rf.me, rf.currentTerm, index, matchIndex)
+			if index == rf.me {
+				continue
+			}
+			if matchIndex >= N {
+				cnt++
+			}
+		}
+		if cnt > len(rf.peers)/2 {
+			leaderLogger.Printf("Node[%v] Term[%v] Find max N[%v],commitIndex[%v]", rf.me, rf.currentTerm, N, rf.commitIndex)
+			break
+		}
+	}
+	if N < 0 || rf.getLog(N).Term != rf.currentTerm {
+		//根据Rules for Servers leaders的第四条，直接跳过
+		if N >= 0 {
+			leaderLogger.Printf("Node[%v] Term[%v] 虽然发现max N[%v] 但logs[N].Term[%v] != currentTerm[%v]", rf.me, rf.currentTerm, N, rf.getLog(N).Term, rf.currentTerm)
+		}
+		return
+	}
+	rf.commitIndex = N
+	rf.persist()
+	if rf.lastApplied != rf.commitIndex {
+		leaderLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastApplied+1, rf.commitIndex)
+		go func() {
+			rf.commitFlag <- struct{}{} //开启一次提交检查
+		}()
+	}
+}
+
 func (rf *Raft) appendLog(server int, args *AppendEntriesArgs) {
 	//向请求中添加日志
 	args.PrevLogIndex = rf.nextIndex[server] - 1
@@ -703,6 +741,8 @@ func (rf *Raft) InstallSnapshotModel(server int, args *InstallSnapshotArgs, repl
 				rf.electionTimer.Reset(randomElectionTimeout())
 			} else {
 				rf.nextIndex[server] = max(rf.nextIndex[server], args.LastIncludedIndex+1)
+				rf.matchIndex[server] = rf.nextIndex[server] - 1
+				rf.checkAndCommit()
 				leaderLogger.Printf("Node[%v] Term[%v] 向Node[%v] 发送快照包成功 Next变更为[%v] LastIncludedIndex[%v] LastIncludedTern[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], args.LastIncludedIndex, args.LastIncludedTerm)
 			}
 			rf.persist()
@@ -721,9 +761,10 @@ func (rf *Raft) heartbeat(server int) {
 	args := AppendEntriesArgs{Term: -1, LeaderCommit: rf.commitIndex, PrevLogTerm: -1, PrevLogIndex: -1, LeaderId: rf.me}
 	reply := AppendEntriesReply{}
 	rf.mu.Lock()
-	if rf.state == LEADER {
+	if rf.state != LEADER {
 		//最后一次检验，因为可能已经不是leader了但是拿到了锁，然后发送了错误的term请求
-		args.Term = rf.currentTerm
+		rf.mu.Unlock()
+		return
 	}
 	if rf.nextIndex[server] <= rf.lastIncludedIndex {
 		//说明需要的下一个请求已经压缩了
@@ -739,12 +780,9 @@ func (rf *Raft) heartbeat(server int) {
 		rf.InstallSnapshotModel(server, &args, &reply)
 		return
 	}
-	//if rf.nextIndex[server] >= rf.logNum {
-	//	rf.mu.Unlock()
-	//	return
-	//}
 	//检查是否需要传入log
 	//debugger.Printf("Node[%v] 检查是否需要向Node[%v] 传入日志，rf.logNum-1：[%v] >= rf.nextIndex[server]：[%v]", rf.me, server, rf.logNum-1, rf.nextIndex[server])
+	args.Term = rf.currentTerm
 	rf.appendLog(server, &args)
 	leaderLogger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,LeaderCommit[%v], nextIndex[server]:%v,rf.logNum:%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, args.LeaderCommit, rf.nextIndex[server], rf.logNum, len(args.Entries), args.Entries)
 	rf.mu.Unlock()
@@ -778,40 +816,7 @@ func (rf *Raft) heartbeat(server int) {
 		rf.matchIndex[server] = rf.nextIndex[server] - 1
 		//查找是否存在可以提交的日志N(过半matchIndex[i] >= N)
 		//这里可以快排的方法快速求出中位数，再看中位数是否符合要求[nLog(n)],为避免增加复杂度，暂且采用简单的方法
-		N := rf.logNum - 1 //最大不会超过日志的最大索引
-		for ; N > rf.commitIndex; N-- {
-			//最小也要比上一次提交的小
-			cnt := 1
-			for index, matchIndex := range rf.matchIndex {
-				//	logger.Printf("DEBUG Node[%v] Term[%v] Index[%v] matchIndex[%v]", rf.me, rf.currentTerm, index, matchIndex)
-				if index == rf.me {
-					continue
-				}
-				if matchIndex >= N {
-					cnt++
-				}
-			}
-			if cnt > len(rf.peers)/2 {
-				leaderLogger.Printf("Node[%v] Term[%v] Find max N[%v],commitIndex[%v]", rf.me, rf.currentTerm, N, rf.commitIndex)
-				break
-			}
-		}
-		if N < 0 || rf.getLog(N).Term != rf.currentTerm {
-			//根据Rules for Servers leaders的第四条，直接跳过
-			if N >= 0 {
-				leaderLogger.Printf("Node[%v] Term[%v] 虽然发现max N[%v] 但logs[N].Term[%v] != currentTerm[%v]", rf.me, rf.currentTerm, N, rf.getLog(N).Term, rf.currentTerm)
-			}
-			rf.mu.Unlock()
-			return
-		}
-		rf.commitIndex = N
-		rf.persist()
-		if rf.lastApplied != rf.commitIndex {
-			leaderLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastApplied+1, rf.commitIndex)
-			go func() {
-				rf.commitFlag <- struct{}{} //开启一次提交检查
-			}()
-		}
+		rf.checkAndCommit()
 	} else if reply.Conflict {
 		//日志复制失败
 		newPrevLogIndex := args.PrevLogIndex
