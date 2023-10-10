@@ -46,6 +46,7 @@ var leaderLogger *log.Logger
 var candidateLogger *log.Logger
 var debugger *log.Logger //debugger会在控制台输出，用于关键打点，谨慎使用
 var lockLogger *log.Logger
+var rpcLogger *log.Logger
 
 func init() {
 	//初始化方法
@@ -69,6 +70,7 @@ func init() {
 	//debugger = log.New(io.MultiWriter(writer, os.Stdout), "[DEBUG] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 	debugger = log.New(io.MultiWriter(writer), "[DEBUG] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 	lockLogger = log.New(io.MultiWriter(writer), "[LOCK] ", log.Ldate|log.Lmicroseconds)
+	rpcLogger = log.New(io.MultiWriter(writer), "[RPC] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
 }
 
 // LogEntry 日志实体结构
@@ -206,7 +208,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.ConflictLogTerm = -1 //设置成非法数字，这样强制主机从reply.ConflictLogIndex开始同步
 		reply.ConflictLogIndex = rf.logNum
 		reply.Conflict = true
-		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为prevLogIndex 位置没有entry prevLogIndex[%v] >= logs.len[%v]", rf.me, args.LeaderId, args.PrevLogIndex, rf.logNum)
+		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为prevLogIndex 位置没有entry prevLogIndex[%v] >= rf.logNum[%v]", rf.me, args.LeaderId, args.PrevLogIndex, rf.logNum)
 		return
 	}
 
@@ -391,7 +393,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			break
 		}
 	}
-	logger.Printf("Node[%v] Term[%v] 创建快照,压缩日志len[%v]: %v from[%v](lastIncludedIndex+1) to[%v] LogNum[%v] len(logs)[%v] logs:%v", rf.me, rf.currentTerm, len(delEntries), delEntries, lastIncludeIndex+1, index, rf.logNum, len(rf.logs), rf.logs)
+	logger.Printf("Node[%v] Term[%v] state[%v] 创建快照,压缩日志len[%v]: %v from[%v](lastIncludedIndex+1) to[%v] LogNum[%v] len(logs)[%v] logs:%v", rf.me, rf.currentTerm, rf.state, len(delEntries), delEntries, lastIncludeIndex+1, index, rf.logNum, len(rf.logs), rf.logs)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if e.Encode(rf.currentTerm) != nil || e.Encode(rf.votedFor) != nil || e.Encode(rf.logs) != nil || e.Encode(rf.lastIncludedIndex) != nil || e.Encode(rf.lastIncludedTerm) != nil {
@@ -432,6 +434,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		SnapshotTerm:  args.LastIncludedTerm,
 		SnapshotIndex: args.LastIncludedIndex,
 	}
+	followLogger.Printf("Node[%v] Term[%v] 准备提交快照包from Node[%v] Term[%v] SnapshotTerm[%v] SnapshotIndex[%v]", rf.me, rf.currentTerm, args.LeaderId, args.Term, args.LastIncludedTerm, args.LastIncludedIndex)
 	go func(msg ApplyMsg) {
 		//异步提交快照包
 		rf.applyCh <- msg
@@ -446,6 +449,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			//压缩过的日志任务已经被提交了，所以提交位置也要增加
 			rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
 			rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
+			followLogger.Printf("Node[%v] Term[%v] 截断压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
 			return
 		}
 	}
@@ -453,8 +457,11 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
 	rf.logs = []LogEntry{}
+	rf.logNum = rf.lastIncludedIndex + 1
 	rf.lastApplied = max(rf.lastApplied, rf.lastIncludedIndex)
 	rf.commitIndex = max(rf.commitIndex, rf.lastIncludedIndex)
+	followLogger.Printf("Node[%v] Term[%v] 补交压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
+
 }
 
 type InstallSnapshotArgs struct {
@@ -580,19 +587,28 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //rpc to call the RequestVote
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
+	uid := generateUID()
+	rpcLogger.Printf("Node[%v] 发送rpc:sendRequestVote给 Node[%v] uid:[%v]", rf.me, server, uid)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	rpcLogger.Printf("Node[%v] 接收rpc:sendRequestVote响应 ok[%v] Node[%v] uid:[%v]", rf.me, ok, server, uid)
 	return ok
 }
 
 //rpc to call the AppendEntries
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	uid := generateUID()
+	rpcLogger.Printf("Node[%v] 发送rpc:sendAppendEntries Node[%v] uid:[%v]", rf.me, server, uid)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+	rpcLogger.Printf("Node[%v] 接收rpc:sendAppendEntries ok[%v] Node[%v] uid:[%v]", rf.me, ok, server, uid)
 	return ok
 }
 
 //rpc to call InstallSnapshot
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
+	uid := generateUID()
+	rpcLogger.Printf("Node[%v] 发送rpc:InstallSnapshot Node[%v] uid:[%v]", rf.me, server, uid)
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
+	rpcLogger.Printf("Node[%v] 接收rpc:InstallSnapshot ok[%v] Node[%v] uid:[%v]", rf.me, ok, server, uid)
 	return ok
 }
 
@@ -733,7 +749,7 @@ func (rf *Raft) InstallSnapshotModel(server int, args *InstallSnapshotArgs, repl
 			//收到了响应
 			if reply.Term > rf.currentTerm {
 				//收到了更大的Term
-				leaderLogger.Printf("Node[%v] Term[%v] 变更为follower节点，因为reply.Term[%v] > rf.currentTerm[%v] 重试测试为[%v]", rf.me, rf.currentTerm, reply.Term, rf.currentTerm, times)
+				leaderLogger.Printf("Node[%v] Term[%v] 变更为follower节点，因为server[%v] reply.Term[%v] > rf.currentTerm[%v] 重试测试为[%v]", rf.me, rf.currentTerm, server, reply.Term, rf.currentTerm, times)
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
 				rf.state = FOLLOWER
@@ -821,7 +837,7 @@ func (rf *Raft) heartbeat(server int) {
 		//日志复制失败
 		newPrevLogIndex := args.PrevLogIndex
 		for newPrevLogIndex > reply.ConflictLogIndex {
-			if rf.getLog(newPrevLogIndex).Term == reply.ConflictLogTerm {
+			if newPrevLogIndex < rf.lastIncludedIndex || rf.getLog(newPrevLogIndex).Term == reply.ConflictLogTerm {
 				break //寻找第一个相同Term的日志
 			}
 			newPrevLogIndex--

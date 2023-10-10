@@ -488,6 +488,7 @@ func (cfg *config) checkNoLeader() {
 // how many servers think a log entry is committed?
 func (cfg *config) nCommitted(index int) (int, interface{}) {
 	count := 0
+	serverHub := []int{}
 	var cmd interface{} = nil
 	for i := 0; i < len(cfg.rafts); i++ {
 		if cfg.applyErr[i] != "" {
@@ -503,10 +504,12 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 				cfg.t.Fatalf("committed values do not match: index %v, %v, %v",
 					index, cmd, cmd1)
 			}
+			serverHub = append(serverHub, count)
 			count += 1
 			cmd = cmd1
 		}
 	}
+	debugger.Printf("KEY VARIABLE count[%v] cmd[%v] hub:%v", count, cmd, serverHub)
 	return count, cmd
 }
 
@@ -572,7 +575,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
-					debugger.Printf("KEY STEP:find the leader[%v],the index of log is[%v]", si, index)
+					debugger.Printf("KEY STEP:find the leader[%v],the index of log is[%v],log:%v", si, index, cmd)
 					break
 				}
 			}
@@ -600,6 +603,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
+		debugger.Printf("客户端准备重试 传入命令[%v]", cmd)
 	}
 	if cfg.checkFinished() == false {
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)

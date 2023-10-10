@@ -17,6 +17,7 @@ type LogRWMutex struct {
 
 func (l *LogRWMutex) Lock() {
 	uid := generateUID()
+	lockLogger.Printf("%s Node[%v] LOCK[%v] 尝试获取锁", getFileLocation(), l.raftId, uid)
 	l.mu.Lock()
 	l.uid = uid
 	lockLogger.Printf("%s Node[%v] LOCK[%v] LOCK", getFileLocation(), l.raftId, uid)
