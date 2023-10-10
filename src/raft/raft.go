@@ -233,7 +233,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				followLogger.Fatalf("Node[%v] 试图删除已提交的日志[%v] index[%v] commitIndex[%v]", rf.me, rf.logs, index, rf.commitIndex)
 			}
 			lastLogNum := len(rf.logs)
-			rf.logs = rf.logs[:index]
+			rf.logs = rf.logs[:index-rf.lastIncludedIndex]
 			//这里为什么不能直接添加，而是批量添加（打散处理后）：会导致在冲突或缺失的情况下无法正确维护日志的连续性，可能会产生不一致的状态
 			rf.logs = append(rf.logs, append([]LogEntry{}, args.Entries[i:]...)...)
 			rf.logNum = rf.logNum + len(rf.logs) - lastLogNum
@@ -456,8 +456,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	//没有找到相同位置，说明落后太多了，新的日志还没有来得及更新
 	rf.lastIncludedIndex = args.LastIncludedIndex
 	rf.lastIncludedTerm = args.LastIncludedTerm
-	rf.logs = []LogEntry{}
-	rf.logNum = rf.lastIncludedIndex + 1
+	rf.logs = []LogEntry{{Term: rf.lastIncludedTerm}}
+	rf.logNum = rf.lastIncludedIndex
 	rf.lastApplied = max(rf.lastApplied, rf.lastIncludedIndex)
 	rf.commitIndex = max(rf.commitIndex, rf.lastIncludedIndex)
 	followLogger.Printf("Node[%v] Term[%v] 补交压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
