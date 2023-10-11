@@ -125,10 +125,11 @@ type Raft struct {
 	applyCh     chan ApplyMsg //chan to apply
 	commitFlag  chan struct{} //用来触发提交日志
 
-	logNum            int    //日志的总数
-	lastIncludedIndex int    //已压缩的日志最后一条的索引
-	lastIncludedTerm  int    //已压缩日志最后一条的term
-	snapshot          []byte //快照包
+	logNum            int           //日志的总数
+	lastIncludedIndex int           //已压缩的日志最后一条的索引
+	lastIncludedTerm  int           //已压缩日志最后一条的term
+	snapshot          []byte        //快照包
+	snapshotFlag      chan ApplyMsg //用来触发提交快照包
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 }
@@ -158,6 +159,7 @@ func (rf *Raft) getLog(index int) LogEntry {
 	n := index - rf.lastIncludedIndex
 	if n == 0 {
 		logger.Printf("Node[%v] Term[%v] 的日志[%v] 已被裁剪，返回日志不包含日志内容", rf.me, rf.currentTerm, index)
+		debugger.Printf("调用位置为：%v", getFileLocation())
 		return LogEntry{
 			Term:    rf.lastIncludedTerm,
 			Index:   rf.lastIncludedIndex,
@@ -268,23 +270,20 @@ func (rf *Raft) commandLog() {
 			rf.mu.Lock()
 			logger.Printf("Node[%v] Term[%v] 开启一次提交检查 lastApplied[%v] CommitIndex[%v]", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+				//println(rf.me, i, rf.lastIncludedIndex, rf.lastApplied, rf.commitIndex)
 				applyMsg := ApplyMsg{
 					CommandValid: true,
 					Command:      rf.getLog(i).Command,
-					CommandIndex: i, //+1是因为和test中从1开始计数保持一直
+					CommandIndex: i,
 				}
 				applyMsgs = append(applyMsgs, applyMsg)
 			}
 			rf.lastApplied = rf.commitIndex
 			rf.mu.Unlock()
-			go func(applyMsgs []ApplyMsg, rf *Raft) {
-				//同步组装，异步发送
-				for _, applyMsg := range applyMsgs {
-					logger.Printf("Node[%v] Term[%v] state[%v],准备提交日志 ApplyMsg:%v", rf.me, rf.currentTerm, rf.state, applyMsg)
-					rf.applyCh <- applyMsg
-				}
-			}(applyMsgs, rf)
-
+			for _, applyMsg := range applyMsgs {
+				rf.applyCh <- applyMsg
+				logger.Printf("Node[%v] Term[%v] state[%v],已提交日志 ApplyMsg:%v", rf.me, rf.currentTerm, rf.state, applyMsg)
+			}
 		}
 	}
 }
@@ -314,32 +313,12 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
-	err := e.Encode(rf.currentTerm)
-	if err != nil {
-		return
-	}
-	err = e.Encode(rf.votedFor)
-	if err != nil {
-		return
-	}
-	err = e.Encode(rf.logs)
-	if err != nil {
-		return
-	}
-	err = e.Encode(rf.lastIncludedIndex)
-	if err != nil {
-		return
-	}
-	err = e.Encode(rf.lastIncludedTerm)
-	if err != nil {
-		return
-	}
-	err = e.Encode(rf.logNum)
-	if err != nil {
+	if e.Encode(rf.currentTerm) != nil || e.Encode(rf.votedFor) != nil || e.Encode(rf.logs) != nil || e.Encode(rf.lastIncludedIndex) != nil || e.Encode(rf.lastIncludedTerm) != nil || e.Encode(rf.logNum) != nil || e.Encode(rf.commitIndex) != nil || e.Encode(rf.lastApplied) != nil {
 		return
 	}
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
+	logger.Printf("%v Node[%v] writePersist lastIncludedIndex[%v] raft:%v", getFileLocation(), rf.me, rf.lastIncludedIndex, rf)
 }
 
 // restore previously persisted state.
@@ -355,7 +334,9 @@ func (rf *Raft) readPersist(data []byte) {
 	var lastIncludedIndex int
 	var lastIncludedTerm int
 	var logNum int
-	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil || d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil || d.Decode(&logNum) != nil {
+	var commitIndex int
+	var lastApplied int
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil || d.Decode(&lastIncludedIndex) != nil || d.Decode(&lastIncludedTerm) != nil || d.Decode(&logNum) != nil || d.Decode(&commitIndex) != nil || d.Decode(&lastApplied) != nil {
 		panic("readPersist decode fail")
 	}
 	rf.currentTerm = currentTerm
@@ -402,6 +383,63 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	data := w.Bytes()
 	rf.persister.Save(data, snapshot)
 }
+func (rf *Raft) ApplySnapshot(args *InstallSnapshotArgs) {
+	rf.mu.RLock()
+	if args.LastIncludedIndex < rf.lastIncludedIndex {
+		rf.mu.RUnlock()
+		return
+	}
+	if args.LastIncludedIndex == rf.lastIncludedIndex && args.LastIncludedTerm == rf.lastIncludedTerm {
+		rf.mu.RUnlock()
+		return
+	}
+	msg := ApplyMsg{
+		CommandValid:  false,
+		SnapshotValid: true,
+		Snapshot:      args.Data,
+		SnapshotTerm:  args.LastIncludedTerm,
+		SnapshotIndex: args.LastIncludedIndex,
+	}
+	rf.mu.RUnlock()
+	rf.applyCh <- msg
+	logger.Printf("Node[%v] Term[%v] state[%v],已提交快照包 ApplyMsg:%v", rf.me, rf.currentTerm, rf.state, msg)
+	rf.mu.Lock()
+	//日志压缩
+	rf.snapshot = args.Data
+	i := 1
+	flag := true
+	for ; i < len(rf.logs); i++ {
+		if rf.logs[i].Index == args.LastIncludedIndex && rf.logs[i].Term <= args.Term {
+			//找到提交位置
+			flag = false
+			rf.lastIncludedTerm = args.LastIncludedTerm
+			rf.lastIncludedIndex = args.LastIncludedIndex
+			rf.logs = append([]LogEntry{{Term: rf.lastIncludedTerm}}, rf.logs[i+1:]...)
+			rf.lastApplied = args.LastIncludedIndex
+			rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
+			//压缩过的日志任务已经被提交了，所以提交位置也要增加
+			followLogger.Printf("Node[%v] Term[%v] 截断压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
+			rf.persister.SaveSnapshot(rf.snapshot)
+			rf.persist()
+			rf.mu.Unlock()
+			logger.Printf("Node[%v] Term[%v] lastApplied[%v] 变更为[%v]", rf.me, rf.currentTerm, rf.lastApplied, rf.lastIncludedIndex)
+			break
+		}
+	}
+	if flag {
+		//没有找到相同位置，说明落后太多了，新的日志还没有来得及更新
+		rf.lastIncludedIndex = args.LastIncludedIndex
+		rf.lastIncludedTerm = args.LastIncludedTerm
+		rf.logs = []LogEntry{{Term: rf.lastIncludedTerm}}
+		rf.logNum = rf.lastIncludedIndex
+		rf.lastApplied = args.LastIncludedIndex
+		rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
+		followLogger.Printf("Node[%v] Term[%v] 补交压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
+		rf.persister.SaveSnapshot(rf.snapshot)
+		rf.persist()
+		rf.mu.Unlock()
+	}
+}
 
 //InstallSnapshot leader send InstallSnapshot to follower when leader has logs not enough to follower
 func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
@@ -416,7 +454,6 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	//在身份转化的流程上面和心跳包把持一致
 	rf.state = FOLLOWER
 	rf.electionTimer.Reset(randomElectionTimeout())
-	rf.snapshot = args.Data
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
@@ -427,41 +464,9 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		//如果快照包的数据已经滞后了，那么直接忽略
 		return
 	}
-	msg := ApplyMsg{
-		CommandValid:  false,
-		SnapshotValid: true,
-		Snapshot:      args.Data,
-		SnapshotTerm:  args.LastIncludedTerm,
-		SnapshotIndex: args.LastIncludedIndex,
-	}
-	followLogger.Printf("Node[%v] Term[%v] 准备提交快照包from Node[%v] Term[%v] SnapshotTerm[%v] SnapshotIndex[%v]", rf.me, rf.currentTerm, args.LeaderId, args.Term, args.LastIncludedTerm, args.LastIncludedIndex)
-	go func(msg ApplyMsg) {
-		//异步提交快照包
-		rf.applyCh <- msg
-	}(msg)
-	//日志压缩
-	for i := 1; i < len(rf.logs); i++ {
-		if rf.logs[i].Index == args.LastIncludedIndex && rf.logs[i].Term <= args.LastIncludedTerm {
-			//找到提交位置
-			rf.lastIncludedTerm = args.LastIncludedTerm
-			rf.lastIncludedIndex = args.LastIncludedIndex
-			rf.logs = append([]LogEntry{{Term: rf.lastIncludedTerm}}, rf.logs[i+1:]...)
-			//压缩过的日志任务已经被提交了，所以提交位置也要增加
-			rf.lastApplied = max(rf.lastApplied, args.LastIncludedIndex)
-			rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
-			followLogger.Printf("Node[%v] Term[%v] 截断压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
-			return
-		}
-	}
-	//没有找到相同位置，说明落后太多了，新的日志还没有来得及更新
-	rf.lastIncludedIndex = args.LastIncludedIndex
-	rf.lastIncludedTerm = args.LastIncludedTerm
-	rf.logs = []LogEntry{{Term: rf.lastIncludedTerm}}
-	rf.logNum = rf.lastIncludedIndex
-	rf.lastApplied = max(rf.lastApplied, rf.lastIncludedIndex)
-	rf.commitIndex = max(rf.commitIndex, rf.lastIncludedIndex)
-	followLogger.Printf("Node[%v] Term[%v] 补交压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
-
+	go func(args *InstallSnapshotArgs) {
+		rf.ApplySnapshot(args)
+	}(args)
 }
 
 type InstallSnapshotArgs struct {
@@ -710,10 +715,10 @@ func (rf *Raft) checkAndCommit() {
 			break
 		}
 	}
-	if N < 1 || rf.getLog(N).Term != rf.currentTerm {
+	if N < rf.lastIncludedIndex || rf.getLog(N).Term != rf.currentTerm {
 		//根据Rules for Servers leaders的第四条，直接跳过
 		if N >= 1 {
-			leaderLogger.Printf("Node[%v] Term[%v] 虽然发现max N[%v] 但logs[N].Term[%v] != currentTerm[%v]", rf.me, rf.currentTerm, N, rf.getLog(N).Term, rf.currentTerm)
+			leaderLogger.Printf("Node[%v] Term[%v] 虽然发现max N[%v] 但N < rf.lastIncludedIndex[%v] 或logs[N].Term[%v] != currentTerm[%v]", rf.me, rf.currentTerm, N, rf.lastIncludedIndex, rf.getLog(N).Term, rf.currentTerm)
 		}
 		return
 	}
@@ -995,6 +1000,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.applyCh = applyCh
 	rf.state = FOLLOWER //初始化为follower节点
 	rf.commitFlag = make(chan struct{})
+	rf.snapshotFlag = make(chan ApplyMsg)
 	rf.logs = make([]LogEntry, 1)
 	rf.mu = LogRWMutex{raftId: me}
 	// Your initialization code here (2A, 2B, 2C).
@@ -1002,9 +1008,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatTimer = time.NewTimer(randomElectionTimeout())
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	if rf.lastIncludedIndex > 0 {
+		rf.lastApplied = rf.lastIncludedIndex
+	}
 	go rf.commandLog()
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	logger.Println(me, "初始化完成", rf)
+	logger.Println(me, "初始化完成", rf, rf.lastApplied, rf.lastIncludedIndex)
 	return rf
 }

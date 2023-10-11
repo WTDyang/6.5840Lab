@@ -204,6 +204,7 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 		cfg.logs[i][j] = xlog[j]
 	}
 	cfg.lastApplied[i] = lastIncludedIndex
+	debugger.Printf("更新状态Node[%v] lastIncludedIndex[%v] s:%v", i, lastIncludedIndex, getFileLocation())
 	return ""
 }
 
@@ -222,9 +223,11 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 		err_msg := ""
 		if m.SnapshotValid {
 			cfg.mu.Lock()
+			debugger.Printf("GET SNAPSHOT MESSAGE NODE[%v] MAG:%v", rf.me, m)
 			err_msg = cfg.ingestSnap(i, m.Snapshot, m.SnapshotIndex)
 			cfg.mu.Unlock()
 		} else if m.CommandValid {
+			debugger.Printf("GET COMMAND MESSAGE NODE[%v] lastApplied[%v] MAG:%v", rf.me, cfg.lastApplied[i], m)
 			if m.CommandIndex != cfg.lastApplied[i]+1 {
 				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
 			}
@@ -241,6 +244,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 
 			cfg.mu.Lock()
 			cfg.lastApplied[i] = m.CommandIndex
+			debugger.Printf("更新状态Node[%v] lastIncludedIndex[%v] lastApplied[%v]", rf.me, m.CommandIndex, cfg.lastApplied[i])
 			cfg.mu.Unlock()
 
 			if (m.CommandIndex+1)%SnapShotInterval == 0 {
