@@ -4,3 +4,5 @@ api.key
 *-handin.tar.gz
 log.txt
 *.log
+failed_log.txt
+*.tmp
