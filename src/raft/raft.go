@@ -527,7 +527,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.logNum > 0 {
 		if rf.getLog(rf.getLastLogIndex()).Term > args.LastLogTerm {
 			//最后一条日志的任期号更大，则不投票，但是会根据term更新自己状态
-			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.getLog(rf.logNum-1).Term, args.LastLogTerm)
+			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.getLog(rf.getLastLogIndex()).Term, args.LastLogTerm)
 			reply.Term = args.Term
 			rf.votedFor = -1
 			rf.persist()
