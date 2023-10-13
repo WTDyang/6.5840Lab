@@ -37,8 +37,8 @@ const (
 	LEADER    STATE = "LEADER"
 )
 
-// HEARTBEAT_INTERVAL 心跳间隔50ms
-const HEARTBEAT_INTERVAL = 50 * time.Millisecond
+// HEARTBEAT_INTERVAL 心跳间隔100ms
+const HEARTBEAT_INTERVAL = 100 * time.Millisecond
 
 var logger *log.Logger
 var followLogger *log.Logger
@@ -1005,7 +1005,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.mu = LogRWMutex{raftId: me}
 	// Your initialization code here (2A, 2B, 2C).
 	rf.electionTimer = time.NewTimer(randomElectionTimeout())
-	rf.heartbeatTimer = time.NewTimer(randomElectionTimeout())
+	rf.heartbeatTimer = time.NewTimer(10 * time.Millisecond)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 	if rf.lastIncludedIndex > 0 {
