@@ -598,7 +598,7 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
-	if atomic.LoadInt32(&rf.state) != LEADER {
+	if !rf.isLeader() {
 		return -1, -1, false
 	}
 	rf.mu.Lock()
@@ -622,6 +622,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.persist()
 	DPrintf(leader, "Node[%v]传入命令[%v],index:%v,term:%v,isLeader:%v", rf.me, command, index, term, isLeader)
 	return index, term, isLeader
+}
+func (rf *Raft) isLeader() bool {
+	return atomic.LoadInt32(&rf.state) == LEADER
 }
 
 // the tester doesn't halt goroutines created by Raft after each test,
@@ -731,15 +734,19 @@ func (rf *Raft) InstallSnapshotModel(server int, args *InstallSnapshotArgs, repl
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
 				rf.state = FOLLOWER
-				rf.persist()
 				rf.electionTimer.Reset(randomElectionTimeout())
-			} else {
-				rf.nextIndex[server] = max(rf.nextIndex[server], args.LastIncludedIndex+1)
-				rf.matchIndex[server] = rf.nextIndex[server] - 1
-				rf.checkAndCommit()
-				DPrintf(leader, "Node[%v] Term[%v] 向Node[%v] 发送快照包成功 Next变更为[%v] LastIncludedIndex[%v] LastIncludedTern[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], args.LastIncludedIndex, args.LastIncludedTerm)
+				rf.persist()
+				rf.mu.Unlock()
+				return
 			}
-			rf.persist()
+			if rf.currentTerm != args.Term {
+				rf.mu.Unlock()
+				return
+			}
+			rf.nextIndex[server] = max(rf.nextIndex[server], args.LastIncludedIndex+1)
+			rf.matchIndex[server] = rf.nextIndex[server] - 1
+			rf.checkAndCommit()
+			DPrintf(leader, "Node[%v] Term[%v] 向Node[%v] 发送快照包成功 Next变更为[%v] LastIncludedIndex[%v] LastIncludedTern[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], args.LastIncludedIndex, args.LastIncludedTerm)
 			rf.mu.Unlock()
 			return
 		}
@@ -785,11 +792,6 @@ func (rf *Raft) heartbeat(server int) {
 		return
 	}
 	rf.mu.Lock()
-	if rf.state != LEADER || rf.currentTerm != args.Term {
-		DPrintf(common, "Node[%v] Term[%v] 收到发送给Node[%v]的延迟消息 但是已经不是leader身份 选择忽略", rf.me, rf.currentTerm, server)
-		rf.mu.Unlock()
-		return
-	}
 	if reply.Term > rf.currentTerm {
 		DPrintf(leader, "Node[%v] Term[%v] 变更为follower节点，因为reply.Term[%v] > rf.currentTerm[%v]", rf.me, rf.currentTerm, reply.Term, rf.currentTerm)
 		rf.currentTerm = reply.Term
@@ -797,6 +799,12 @@ func (rf *Raft) heartbeat(server int) {
 		rf.state = FOLLOWER
 		rf.persist()
 		rf.electionTimer.Reset(randomElectionTimeout())
+		rf.mu.Unlock()
+		return
+	}
+
+	if rf.state != LEADER || rf.currentTerm != args.Term {
+		DPrintf(common, "Node[%v] Term[%v] 收到发送给Node[%v]的延迟消息 但是已经不是leader身份 选择忽略", rf.me, rf.currentTerm, server)
 		rf.mu.Unlock()
 		return
 	}
@@ -861,14 +869,7 @@ func (rf *Raft) startLeaderAction() {
 		}
 	}
 	//循环广播
-	for rf.killed() == false {
-		rf.mu.RLock()
-		if rf.state != LEADER {
-			rf.mu.RUnlock()
-			break
-		}
-		rf.mu.RUnlock()
-		//DPrintf(common,"%d - %d - %d\n", rf.me, rf.currentTerm, rf.state)
+	for rf.killed() == false || rf.isLeader() == false {
 		broadcast()
 		rf.heartbeatTimer.Reset(HEARTBEAT_INTERVAL)
 		<-rf.heartbeatTimer.C
