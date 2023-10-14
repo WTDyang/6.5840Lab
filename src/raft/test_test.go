@@ -244,7 +244,7 @@ func TestLeaderFailure2B(t *testing.T) {
 	// disconnect the first leader.
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-	debugger.Printf("TestLeaderFailure2B KEY STEP: Node[%v] 下线", leader1)
+	DPrintf(debug, "TestLeaderFailure2B KEY STEP: Node[%v] 下线", leader1)
 	// the remaining followers should elect
 	// a new leader.
 	cfg.one(102, servers-1, false)
@@ -254,7 +254,7 @@ func TestLeaderFailure2B(t *testing.T) {
 	// disconnect the new leader.
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
-	debugger.Printf("TestLeaderFailure2B KEY STEP: Node[%v] 下线", leader2)
+	DPrintf(debug, "TestLeaderFailure2B KEY STEP: Node[%v] 下线", leader2)
 	// submit a command to each server.
 	for i := 0; i < servers; i++ {
 		cfg.rafts[i].Start(104)
@@ -285,7 +285,7 @@ func TestFailAgree2B(t *testing.T) {
 	// disconnect one follower from the network.
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
-	debugger.Printf("TEST KEY STEP disconnect one follower[%v] from the network", (leader+1)%servers)
+	DPrintf(debug, "TEST KEY STEP disconnect one follower[%v] from the network", (leader+1)%servers)
 	// the leader and remaining follower should be
 	// able to agree despite the disconnected follower.
 	cfg.one(102, servers-1, false)
@@ -296,7 +296,7 @@ func TestFailAgree2B(t *testing.T) {
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
-	debugger.Printf("TEST KEY STEP re-connect follower[%v] from the network", (leader+1)%servers)
+	DPrintf(debug, "TEST KEY STEP re-connect follower[%v] from the network", (leader+1)%servers)
 
 	// the full set of servers should preserve
 	// previous agreements, and be able to agree
@@ -322,7 +322,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	cfg.disconnect((leader + 1) % servers)
 	cfg.disconnect((leader + 2) % servers)
 	cfg.disconnect((leader + 3) % servers)
-	debugger.Printf("TEST KEY STEP 断开连接[%v,%v,%v]", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
+	DPrintf(debug, "TEST KEY STEP 断开连接[%v,%v,%v]", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
 	index, _, ok := cfg.rafts[leader].Start(20)
 	if ok != true {
 		t.Fatalf("leader rejected Start()")
@@ -342,7 +342,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	cfg.connect((leader + 1) % servers)
 	cfg.connect((leader + 2) % servers)
 	cfg.connect((leader + 3) % servers)
-	debugger.Printf("TEST KEY STEP 重新连接[%v,%v,%v]", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
+	DPrintf(debug, "TEST KEY STEP 重新连接[%v,%v,%v]", (leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
 
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
@@ -473,27 +473,27 @@ func TestRejoin2B(t *testing.T) {
 	// leader network failure
 	leader1 := cfg.checkOneLeader()
 	cfg.disconnect(leader1)
-	debugger.Printf("TEST KEY STEP 原leader[%v] 断开连接", leader1)
+	DPrintf(debug, "TEST KEY STEP 原leader[%v] 断开连接", leader1)
 	// make old leader try to agree on some entries
 	cfg.rafts[leader1].Start(102)
 	cfg.rafts[leader1].Start(103)
 	cfg.rafts[leader1].Start(104)
-	debugger.Printf("TEST KEY STEP leader[%v] 传入三个指令", leader1)
+	DPrintf(debug, "TEST KEY STEP leader[%v] 传入三个指令", leader1)
 	// new leader commits, also for index=2
 	cfg.one(103, 2, true)
 
 	// new leader network failure
 	leader2 := cfg.checkOneLeader()
 	cfg.disconnect(leader2)
-	debugger.Printf("TEST KEY STEP 新leader[%v] 断开连接", leader2)
+	DPrintf(debug, "TEST KEY STEP 新leader[%v] 断开连接", leader2)
 	// old leader connected again
 	cfg.connect(leader1)
-	debugger.Printf("TEST KEY STEP 原leader[%v] 重新连接", leader1)
+	DPrintf(debug, "TEST KEY STEP 原leader[%v] 重新连接", leader1)
 	cfg.one(104, 2, true)
 
 	// all together now
 	cfg.connect(leader2)
-	debugger.Printf("TEST KEY STEP 新leader[%v] 重新连接", leader2)
+	DPrintf(debug, "TEST KEY STEP 新leader[%v] 重新连接", leader2)
 	cfg.one(105, servers, true)
 
 	cfg.end()
@@ -501,12 +501,12 @@ func TestRejoin2B(t *testing.T) {
 
 //func TestBackup2BLoop(t *testing.T) {
 //	for i := 1; i <= 100; i++ {
-//		debugger.Printf("loooooooooooooooooop %v 开启第[%v]次测试", time.Now(), i)
+//		DPrintf(debug,"loooooooooooooooooop %v 开启第[%v]次测试", time.Now(), i)
 //		fmt.Printf("loooooooooooooooooop %v\n 开启第[%v]次测试", time.Now(), i)
 //		file, _ := os.OpenFile("log.log", os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0755) //覆盖
 //		file.Close()
 //		TestBackup2B(t)
-//		debugger.Printf("测试完成")
+//		DPrintf(debug,"测试完成")
 //
 //		time.Sleep(2 * time.Second)
 //	}
@@ -525,7 +525,7 @@ func TestBackup2B(t *testing.T) {
 	cfg.disconnect((leader1 + 2) % servers)
 	cfg.disconnect((leader1 + 3) % servers)
 	cfg.disconnect((leader1 + 4) % servers)
-	debugger.Printf("TEST KEY STEP followers[%v ,%v ,%v] 断开连接", (leader1+2)%servers, (leader1+3)%servers, (leader1+4)%servers)
+	DPrintf(debug, "TEST KEY STEP followers[%v ,%v ,%v] 断开连接", (leader1+2)%servers, (leader1+3)%servers, (leader1+4)%servers)
 	// submit lots of commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader1].Start(rand.Int())
@@ -535,12 +535,12 @@ func TestBackup2B(t *testing.T) {
 
 	cfg.disconnect((leader1 + 0) % servers)
 	cfg.disconnect((leader1 + 1) % servers)
-	debugger.Printf("TEST KEY STEP leader[%v] follower[%v] 断开连接", (leader1+0)%servers, (leader1+1)%servers)
+	DPrintf(debug, "TEST KEY STEP leader[%v] follower[%v] 断开连接", (leader1+0)%servers, (leader1+1)%servers)
 	// allow other partition to recover
 	cfg.connect((leader1 + 2) % servers)
 	cfg.connect((leader1 + 3) % servers)
 	cfg.connect((leader1 + 4) % servers)
-	debugger.Printf("TEST KEY STEP followers[%v ,%v ,%v] 重新连接", (leader1+2)%servers, (leader1+3)%servers, (leader1+4)%servers)
+	DPrintf(debug, "TEST KEY STEP followers[%v ,%v ,%v] 重新连接", (leader1+2)%servers, (leader1+3)%servers, (leader1+4)%servers)
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
 		cfg.one(rand.Int(), 3, true)
@@ -553,7 +553,7 @@ func TestBackup2B(t *testing.T) {
 		other = (leader2 + 1) % servers
 	}
 	cfg.disconnect(other)
-	debugger.Printf("TEST KEY STEP other[%v] 断开连接", other)
+	DPrintf(debug, "TEST KEY STEP other[%v] 断开连接", other)
 	// lots more commands that won't commit
 	for i := 0; i < 50; i++ {
 		cfg.rafts[leader2].Start(rand.Int())
@@ -564,12 +564,12 @@ func TestBackup2B(t *testing.T) {
 	// bring original leader back to life,
 	for i := 0; i < servers; i++ {
 		cfg.disconnect(i)
-		debugger.Printf("TEST KEY STEP servers[%v] 断开连接", i)
+		DPrintf(debug, "TEST KEY STEP servers[%v] 断开连接", i)
 	}
 	cfg.connect((leader1 + 0) % servers)
 	cfg.connect((leader1 + 1) % servers)
 	cfg.connect(other)
-	debugger.Printf("TEST KEY STEP servers[%v ,%v] other[%v] 重新连接", (leader1+0)%servers, (leader1+1)%servers, other)
+	DPrintf(debug, "TEST KEY STEP servers[%v ,%v] other[%v] 重新连接", (leader1+0)%servers, (leader1+1)%servers, other)
 
 	// lots of successful commands to new group.
 	for i := 0; i < 50; i++ {
@@ -579,7 +579,7 @@ func TestBackup2B(t *testing.T) {
 	// now everyone
 	for i := 0; i < servers; i++ {
 		cfg.connect(i)
-		debugger.Printf("TEST KEY STEP servers[%v] 重新连接", i)
+		DPrintf(debug, "TEST KEY STEP servers[%v] 重新连接", i)
 	}
 	cfg.one(rand.Int(), servers, true)
 

@@ -20,9 +20,6 @@ package raft
 import (
 	"6.5840/labgob"
 	"bytes"
-	"io"
-	"log"
-	"os"
 	"sync/atomic"
 	"time"
 
@@ -39,39 +36,6 @@ const (
 
 // HEARTBEAT_INTERVAL 心跳间隔100ms
 const HEARTBEAT_INTERVAL = 100 * time.Millisecond
-
-var logger *log.Logger
-var followLogger *log.Logger
-var leaderLogger *log.Logger
-var candidateLogger *log.Logger
-var debugger *log.Logger //debugger会在控制台输出，用于关键打点，谨慎使用
-var lockLogger *log.Logger
-var rpcLogger *log.Logger
-
-func init() {
-	//初始化方法
-	//日志系统初始化
-	//writer, err := os.OpenFile("log.log", os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0755) //追加模式
-	writer, err := os.OpenFile("log.log", os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0755) //覆盖
-	if err != nil {
-		log.Fatalf("create file log.txt failed: %v", err)
-	}
-	title := "|--------------------------------------------------------------------------------------------|\n" +
-		"|--------------------" + time.Now().String() + "---------------------|\n" +
-		"|--------------------------------------------------------------------------------------------|\n"
-	_, err = writer.WriteString(title)
-	if err != nil {
-		log.Fatalf("write the title failed: %v", err)
-	}
-	logger = log.New(io.MultiWriter(writer), "[COMMON] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
-	followLogger = log.New(io.MultiWriter(writer), "[FOLLOWER] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
-	leaderLogger = log.New(io.MultiWriter(writer), "[LEADER] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
-	candidateLogger = log.New(io.MultiWriter(writer), "[CANDIDATE] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
-	//debugger = log.New(io.MultiWriter(writer, os.Stdout), "[DEBUG] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
-	debugger = log.New(io.MultiWriter(writer), "[DEBUG] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
-	lockLogger = log.New(io.MultiWriter(writer), "[LOCK] ", log.Ldate|log.Lmicroseconds)
-	rpcLogger = log.New(io.MultiWriter(writer), "[RPC] ", log.Lshortfile|log.Ldate|log.Lmicroseconds)
-}
 
 // LogEntry 日志实体结构
 type LogEntry struct {
@@ -158,8 +122,8 @@ type AppendEntriesReply struct {
 func (rf *Raft) getLog(index int) LogEntry {
 	n := index - rf.lastIncludedIndex
 	if n == 0 {
-		logger.Printf("Node[%v] Term[%v] 的日志[%v] 已被裁剪，返回日志不包含日志内容", rf.me, rf.currentTerm, index)
-		debugger.Printf("调用位置为：%v", getFileLocation())
+		DPrintf(common, "Node[%v] Term[%v] 的日志[%v] 已被裁剪，返回日志不包含日志内容", rf.me, rf.currentTerm, index)
+		DPrintf(debug, "调用位置为：%v", getFileLocation())
 		return LogEntry{
 			Term:    rf.lastIncludedTerm,
 			Index:   rf.lastIncludedIndex,
@@ -175,14 +139,14 @@ func (rf *Raft) getLastLogIndex() int {
 
 // AppendEntries Invoked by leader to replicate log entries; also used as heartbeat
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	logger.Printf("Node[%v] Term[%v] 接收到Node[%v] Term[%v]心跳", rf.me, rf.currentTerm, args.LeaderId, args.Term)
+	DPrintf(common, "Node[%v] Term[%v] 接收到Node[%v] Term[%v]心跳", rf.me, rf.currentTerm, args.LeaderId, args.Term)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if rf.killed() {
 		return
 	}
 	if args.Term < rf.currentTerm {
-		//logger.Printf("%d屈服于%d(1),term:(%d,%d)\n", args.LeaderId, rf.me, rf.currentTerm, args.Term)
+		//DPrintf(common,"%d屈服于%d(1),term:(%d,%d)\n", args.LeaderId, rf.me, rf.currentTerm, args.Term)
 		// Reply false if term < currentTerm
 		//如果leader的term比某一个follower的term还小，说明有问题
 		reply.Success = false
@@ -194,7 +158,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term > rf.currentTerm {
 		// If RPC request contains term T > currentTerm
 		// 更新状态
-		logger.Printf("Node[%v] term[%v] 接收到心跳[%v],term:[%v],成为FOLLOWER\n", rf.me, args.Term, args.LeaderId, rf.currentTerm)
+		DPrintf(common, "Node[%v] term[%v] 接收到心跳[%v],term:[%v],成为FOLLOWER\n", rf.me, args.Term, args.LeaderId, rf.currentTerm)
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
 		rf.state = FOLLOWER
@@ -203,14 +167,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//只要接收到正常的心跳就可以重置计时器，更新任期信息
 	reply.Term = rf.currentTerm
 	rf.electionTimer.Reset(randomElectionTimeout())
-	followLogger.Printf("Node[%v] term[%v] 心跳刷新", rf.me, args.Term)
+	DPrintf(follower, "Node[%v] term[%v] 心跳刷新", rf.me, args.Term)
 	//follower 在prevLogIndex 位置没有entry
 	if args.PrevLogIndex > rf.getLastLogIndex() {
 		reply.Term, reply.Success = rf.currentTerm, false
 		reply.ConflictLogTerm = -1                        //设置成非法数字，这样强制主机从reply.ConflictLogIndex开始同步
 		reply.ConflictLogIndex = rf.getLastLogIndex() + 1 //(总书为logNum 那么最后一个位置的索引即使rf.logNum 那么下一个位置的索引就是rf.logNum+1)
 		reply.Conflict = true
-		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为prevLogIndex 位置没有entry prevLogIndex[%v] >= rf.logNum[%v]", rf.me, args.LeaderId, args.PrevLogIndex, rf.logNum)
+		DPrintf(follower, "Node[%v] 拒绝接收Node[%v]的日志 因为prevLogIndex 位置没有entry prevLogIndex[%v] >= rf.logNum[%v]", rf.me, args.LeaderId, args.PrevLogIndex, rf.logNum)
 		return
 	}
 
@@ -223,7 +187,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.ConflictLogIndex = i //设置成第一个符合条件的值（将会是被覆盖掉的）
 		}
 		reply.Conflict = true
-		followLogger.Printf("Node[%v] 拒绝接收Node[%v]的日志 因为在prevLogIndex位置entry的term与leader不同 PrevLogTerm[%v] != rf.getLog(args.PrevLogIndex).Term[%v]", rf.me, args.LeaderId, args.PrevLogTerm, rf.getLog(args.PrevLogIndex).Term)
+		DPrintf(follower, "Node[%v] 拒绝接收Node[%v]的日志 因为在prevLogIndex位置entry的term与leader不同 PrevLogTerm[%v] != rf.getLog(args.PrevLogIndex).Term[%v]", rf.me, args.LeaderId, args.PrevLogTerm, rf.getLog(args.PrevLogIndex).Term)
 		return
 	}
 	//日志复制
@@ -232,14 +196,14 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if index > rf.getLastLogIndex() || rf.getLog(index).Term != entry.Term {
 			//之前没有这个索引位置，或者发生了冲突(保持强一致性原则，只要冲突就与leader保持一直)
 			if index <= rf.commitIndex {
-				followLogger.Fatalf("Node[%v] 试图删除已提交的日志[%v] index[%v] commitIndex[%v]", rf.me, rf.logs, index, rf.commitIndex)
+				DPrintf(follower, "Node[%v] 试图删除已提交的日志[%v] index[%v] commitIndex[%v]", rf.me, rf.logs, index, rf.commitIndex)
 			}
 			lastLogNum := len(rf.logs)
 			rf.logs = rf.logs[:index-rf.lastIncludedIndex]
 			//这里为什么不能直接添加，而是批量添加（打散处理后）：会导致在冲突或缺失的情况下无法正确维护日志的连续性，可能会产生不一致的状态
 			rf.logs = append(rf.logs, append([]LogEntry{}, args.Entries[i:]...)...)
 			rf.logNum = rf.logNum + len(rf.logs) - lastLogNum
-			followLogger.Printf("Node[%v] Term[%v] 追加来自Node[%v]的日志，索引为:%v, 内容为%v", rf.me, rf.currentTerm, args.LeaderId, index, entry)
+			DPrintf(follower, "Node[%v] Term[%v] 追加来自Node[%v]的日志，索引为:%v, 内容为%v", rf.me, rf.currentTerm, args.LeaderId, index, entry)
 			break
 		}
 	}
@@ -249,7 +213,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.commitIndex = min(args.LeaderCommit, rf.getLastLogIndex())
 		rf.persist()
 		if rf.lastApplied != rf.commitIndex {
-			followLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastApplied+1, rf.commitIndex)
+			DPrintf(follower, "Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastApplied+1, rf.commitIndex)
 			go func() {
 				rf.commitFlag <- struct{}{} //开启一次提交检查
 			}()
@@ -268,7 +232,7 @@ func (rf *Raft) commandLog() {
 			//启动一次提交检查
 			var applyMsgs []ApplyMsg
 			rf.mu.Lock()
-			logger.Printf("Node[%v] Term[%v] 开启一次提交检查 lastApplied[%v] CommitIndex[%v]", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
+			DPrintf(common, "Node[%v] Term[%v] 开启一次提交检查 lastApplied[%v] CommitIndex[%v]", rf.me, rf.currentTerm, rf.lastApplied, rf.commitIndex)
 			for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
 				//println(rf.me, i, rf.lastIncludedIndex, rf.lastApplied, rf.commitIndex)
 				applyMsg := ApplyMsg{
@@ -282,7 +246,7 @@ func (rf *Raft) commandLog() {
 			rf.mu.Unlock()
 			for _, applyMsg := range applyMsgs {
 				rf.applyCh <- applyMsg
-				logger.Printf("Node[%v] Term[%v] state[%v],已提交日志 ApplyMsg:%v", rf.me, rf.currentTerm, rf.state, applyMsg)
+				DPrintf(common, "Node[%v] Term[%v] state[%v],已提交日志 ApplyMsg:%v", rf.me, rf.currentTerm, rf.state, applyMsg)
 			}
 		}
 	}
@@ -299,7 +263,7 @@ func (rf *Raft) GetState() (int, bool) {
 	term = rf.currentTerm
 	isleader = rf.state == LEADER
 	//rf.mu.RUnlock()
-	logger.Println(rf.me, "任期为：", term, "是否为leader：", isleader)
+	DPrintf(common, "Node[%v] 任期为[%v] 身份为[%v]", rf.me, term, rf.state)
 	return term, isleader
 }
 
@@ -318,7 +282,7 @@ func (rf *Raft) persist() {
 	}
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	logger.Printf("%v Node[%v] writePersist lastIncludedIndex[%v] raft:%v", getFileLocation(), rf.me, rf.lastIncludedIndex, rf)
+	DPrintf(common, "%v Node[%v] writePersist lastIncludedIndex[%v] raft:%v", getFileLocation(), rf.me, rf.lastIncludedIndex, rf)
 }
 
 // restore previously persisted state.
@@ -345,7 +309,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.logNum = logNum
-	logger.Printf("Node[%v] readPersist raft:%v", rf.me, rf)
+	DPrintf(common, "Node[%v] readPersist raft:%v", rf.me, rf)
 }
 
 // the service says it has created a snapshot that has
@@ -374,7 +338,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 			break
 		}
 	}
-	logger.Printf("Node[%v] Term[%v] state[%v] 创建快照,压缩日志len[%v]: %v from[%v](lastIncludedIndex+1) to[%v] LogNum[%v] len(logs)[%v] logs:%v", rf.me, rf.currentTerm, rf.state, len(delEntries), delEntries, lastIncludeIndex+1, index, rf.logNum, len(rf.logs), rf.logs)
+	DPrintf(common, "Node[%v] Term[%v] state[%v] 创建快照,压缩日志len[%v]: %v from[%v](lastIncludedIndex+1) to[%v] LogNum[%v] len(logs)[%v] logs:%v", rf.me, rf.currentTerm, rf.state, len(delEntries), delEntries, lastIncludeIndex+1, index, rf.logNum, len(rf.logs), rf.logs)
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 	if e.Encode(rf.currentTerm) != nil || e.Encode(rf.votedFor) != nil || e.Encode(rf.logs) != nil || e.Encode(rf.lastIncludedIndex) != nil || e.Encode(rf.lastIncludedTerm) != nil {
@@ -402,7 +366,7 @@ func (rf *Raft) ApplySnapshot(args *InstallSnapshotArgs) {
 	}
 	rf.mu.RUnlock()
 	rf.applyCh <- msg
-	logger.Printf("Node[%v] Term[%v] state[%v],已提交快照包 ApplyMsg:%v", rf.me, rf.currentTerm, rf.state, msg)
+	DPrintf(common, "Node[%v] Term[%v] state[%v],已提交快照包 ApplyMsg:%v", rf.me, rf.currentTerm, rf.state, msg)
 	rf.mu.Lock()
 	//日志压缩
 	rf.snapshot = args.Data
@@ -418,11 +382,11 @@ func (rf *Raft) ApplySnapshot(args *InstallSnapshotArgs) {
 			rf.lastApplied = args.LastIncludedIndex
 			rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
 			//压缩过的日志任务已经被提交了，所以提交位置也要增加
-			followLogger.Printf("Node[%v] Term[%v] 截断压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
+			DPrintf(follower, "Node[%v] Term[%v] 截断压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
 			rf.persister.SaveSnapshot(rf.snapshot)
 			rf.persist()
 			rf.mu.Unlock()
-			logger.Printf("Node[%v] Term[%v] lastApplied[%v] 变更为[%v]", rf.me, rf.currentTerm, rf.lastApplied, rf.lastIncludedIndex)
+			DPrintf(common, "Node[%v] Term[%v] lastApplied[%v] 变更为[%v]", rf.me, rf.currentTerm, rf.lastApplied, rf.lastIncludedIndex)
 			break
 		}
 	}
@@ -434,7 +398,7 @@ func (rf *Raft) ApplySnapshot(args *InstallSnapshotArgs) {
 		rf.logNum = rf.lastIncludedIndex
 		rf.lastApplied = args.LastIncludedIndex
 		rf.commitIndex = max(rf.commitIndex, args.LastIncludedIndex)
-		followLogger.Printf("Node[%v] Term[%v] 补交压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
+		DPrintf(follower, "Node[%v] Term[%v] 补交压缩 日志压缩后lastIncludedTerm[%v] lastIncludedIndex[%v] LogNum[%v] logs:%v", rf.me, rf.currentTerm, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.logNum, rf.logs)
 		rf.persister.SaveSnapshot(rf.snapshot)
 		rf.persist()
 		rf.mu.Unlock()
@@ -457,7 +421,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
-		logger.Printf("Node[%v] term[%v] 接收到[%v]快照包,term:[%v],成为FOLLOWER\n", rf.me, args.Term, args.LeaderId, rf.currentTerm)
+		DPrintf(common, "Node[%v] term[%v] 接收到[%v]快照包,term:[%v],成为FOLLOWER\n", rf.me, args.Term, args.LeaderId, rf.currentTerm)
 	}
 	reply.Term = rf.currentTerm
 	if args.LastIncludedIndex < rf.lastIncludedIndex || (rf.lastIncludedIndex == args.LastIncludedIndex && rf.lastIncludedTerm == args.LastIncludedTerm) {
@@ -507,7 +471,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		// Reply false if term < currentTerm
-		logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为args.Term[%v] < rf.currentTerm[%v]", rf.me, rf.currentTerm, args.CandidateId, args.Term, args.Term, rf.currentTerm)
+		DPrintf(common, "Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为args.Term[%v] < rf.currentTerm[%v]", rf.me, rf.currentTerm, args.CandidateId, args.Term, args.Term, rf.currentTerm)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -515,7 +479,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 	if args.Term > rf.currentTerm {
 		// If RPC request contains term T > currentTerm:set currentTerm = T, convert to follower
-		logger.Printf("Node[%v] 更新为follow节点，因为args.Term[%v] > rf.currentTerm[%v]", rf.me, args.Term, rf.currentTerm)
+		DPrintf(common, "Node[%v] 更新为follow节点，因为args.Term[%v] > rf.currentTerm[%v]", rf.me, args.Term, rf.currentTerm)
 		rf.currentTerm = args.Term
 		//这里赋值为-1，下面判断是否为-1即可排除这种可能
 		rf.votedFor = -1
@@ -527,14 +491,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.logNum > 0 && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		if rf.getLog(rf.getLastLogIndex()).Term > args.LastLogTerm {
 			//最后一条日志的任期号更大，则不投票，但是会根据term更新自己状态
-			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.getLog(rf.getLastLogIndex()).Term, args.LastLogTerm)
+			DPrintf(common, "Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.getLog(rf.getLastLogIndex()).Term, args.LastLogTerm)
 			reply.Term = args.Term
 			reply.VoteGranted = false
 			return
 		}
 		if rf.getLog(rf.getLastLogIndex()).Term == args.LastLogTerm && rf.getLastLogIndex() > args.LastLogIndex {
 			//日志条目更多，也不更新
-			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为日志条目[%v]比候选者日志条目[%v]更多", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.logNum, args.LastLogIndex)
+			DPrintf(common, "Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为日志条目[%v]比候选者日志条目[%v]更多", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.logNum, args.LastLogIndex)
 			reply.VoteGranted = false
 			reply.Term = args.Term
 			return
@@ -544,7 +508,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if rf.votedFor != -1 && rf.votedFor != args.CandidateId {
 		// If votedFor is null or candidateId, grant vote; otherwise reject
 		//已投票
-		logger.Printf("Node[%v] Term[%v] 已经投票给其他节点[%v],因此拒绝投票给Node[%v] Term[%v]", rf.me, rf.currentTerm, rf.votedFor, args.CandidateId, args.Term)
+		DPrintf(common, "Node[%v] Term[%v] 已经投票给其他节点[%v],因此拒绝投票给Node[%v] Term[%v]", rf.me, rf.currentTerm, rf.votedFor, args.CandidateId, args.Term)
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
 		return
@@ -554,7 +518,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.electionTimer.Reset(randomElectionTimeout())
 	rf.votedFor = args.CandidateId
 	rf.persist()
-	logger.Printf("Node[%v] 投票给Node[%v]", rf.me, rf.votedFor)
+	DPrintf(common, "Node[%v] 投票给Node[%v]", rf.me, rf.votedFor)
 	reply.VoteGranted = true
 	reply.Term = rf.currentTerm
 }
@@ -589,27 +553,27 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 //rpc to call the RequestVote
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	uid := generateUID()
-	rpcLogger.Printf("Node[%v] 发送rpc:sendRequestVote给 Node[%v] uid:[%v]", rf.me, server, uid)
+	DPrintf(rpc, "Node[%v] 发送rpc:sendRequestVote给 Node[%v] uid:[%v]", rf.me, server, uid)
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	rpcLogger.Printf("Node[%v] 接收rpc:sendRequestVote响应 ok[%v] Node[%v] uid:[%v]", rf.me, ok, server, uid)
+	DPrintf(rpc, "Node[%v] 接收rpc:sendRequestVote响应 ok[%v] Node[%v] uid:[%v]", rf.me, ok, server, uid)
 	return ok
 }
 
 //rpc to call the AppendEntries
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
 	uid := generateUID()
-	rpcLogger.Printf("Node[%v] 发送rpc:sendAppendEntries Node[%v] uid:[%v]", rf.me, server, uid)
+	DPrintf(rpc, "Node[%v] 发送rpc:sendAppendEntries Node[%v] uid:[%v]", rf.me, server, uid)
 	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	rpcLogger.Printf("Node[%v] 接收rpc:sendAppendEntries ok[%v] Node[%v] uid:[%v]", rf.me, ok, server, uid)
+	DPrintf(rpc, "Node[%v] 接收rpc:sendAppendEntries ok[%v] Node[%v] uid:[%v]", rf.me, ok, server, uid)
 	return ok
 }
 
 //rpc to call InstallSnapshot
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
 	uid := generateUID()
-	rpcLogger.Printf("Node[%v] 发送rpc:InstallSnapshot Node[%v] uid:[%v]", rf.me, server, uid)
+	DPrintf(rpc, "Node[%v] 发送rpc:InstallSnapshot Node[%v] uid:[%v]", rf.me, server, uid)
 	ok := rf.peers[server].Call("Raft.InstallSnapshot", args, reply)
-	rpcLogger.Printf("Node[%v] 接收rpc:InstallSnapshot ok[%v] Node[%v] uid:[%v]", rf.me, ok, server, uid)
+	DPrintf(rpc, "Node[%v] 接收rpc:InstallSnapshot ok[%v] Node[%v] uid:[%v]", rf.me, ok, server, uid)
 	return ok
 }
 
@@ -645,7 +609,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, LogEntry)
 	rf.logNum++
 	rf.persist()
-	leaderLogger.Printf("Node[%v]传入命令[%v],index:%v,term:%v,isLeader:%v", rf.me, command, index, term, isLeader)
+	DPrintf(leader, "Node[%v]传入命令[%v],index:%v,term:%v,isLeader:%v", rf.me, command, index, term, isLeader)
 	return index, term, isLeader
 }
 
@@ -661,7 +625,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
-	logger.Printf("Node[%v] 死掉了 属性为:%v", rf.me, rf)
+	DPrintf(common, "Node[%v] 死掉了 属性为:%v", rf.me, rf)
 }
 
 func (rf *Raft) killed() bool {
@@ -676,7 +640,7 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			rf.mu.Lock()
-			logger.Printf("Node[%v] Term[%v]超时,身份是[%v]\n", rf.me, rf.currentTerm, rf.state)
+			DPrintf(common, "Node[%v] Term[%v]超时,身份是[%v]\n", rf.me, rf.currentTerm, rf.state)
 			if rf.state == LEADER {
 				//if is a leader:beak
 				rf.mu.Unlock()
@@ -698,7 +662,7 @@ func (rf *Raft) checkAndCommit() {
 		//最小也要比上一次提交的小
 		cnt := 1
 		for index, matchIndex := range rf.matchIndex {
-			//	logger.Printf("DEBUG Node[%v] Term[%v] Index[%v] matchIndex[%v]", rf.me, rf.currentTerm, index, matchIndex)
+			//	DPrintf(common,"DEBUG Node[%v] Term[%v] Index[%v] matchIndex[%v]", rf.me, rf.currentTerm, index, matchIndex)
 			if index == rf.me {
 				continue
 			}
@@ -707,21 +671,21 @@ func (rf *Raft) checkAndCommit() {
 			}
 		}
 		if cnt > len(rf.peers)/2 {
-			leaderLogger.Printf("Node[%v] Term[%v] Find max N[%v],commitIndex[%v]", rf.me, rf.currentTerm, N, rf.commitIndex)
+			DPrintf(leader, "Node[%v] Term[%v] Find max N[%v],commitIndex[%v]", rf.me, rf.currentTerm, N, rf.commitIndex)
 			break
 		}
 	}
 	if N < rf.lastIncludedIndex || rf.getLog(N).Term != rf.currentTerm {
 		//根据Rules for Servers leaders的第四条，直接跳过
 		if N >= 1 {
-			leaderLogger.Printf("Node[%v] Term[%v] 虽然发现max N[%v] 但N < rf.lastIncludedIndex[%v] 或logs[N].Term[%v] != currentTerm[%v]", rf.me, rf.currentTerm, N, rf.lastIncludedIndex, rf.getLog(N).Term, rf.currentTerm)
+			DPrintf(leader, "Node[%v] Term[%v] 虽然发现max N[%v] 但N < rf.lastIncludedIndex[%v] 或logs[N].Term[%v] != currentTerm[%v]", rf.me, rf.currentTerm, N, rf.lastIncludedIndex, rf.getLog(N).Term, rf.currentTerm)
 		}
 		return
 	}
 	rf.commitIndex = N
 	rf.persist()
 	if rf.lastApplied != rf.commitIndex {
-		leaderLogger.Printf("Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastApplied+1, rf.commitIndex)
+		DPrintf(leader, "Node[%v] Term[%v] 准备提交日志[%v] to [%v]", rf.me, rf.currentTerm, rf.lastApplied+1, rf.commitIndex)
 		go func() {
 			rf.commitFlag <- struct{}{} //开启一次提交检查
 		}()
@@ -741,7 +705,7 @@ func (rf *Raft) appendLog(server int, args *AppendEntriesArgs) {
 //InstallSnapshotModel 需要发送快照包以快速同步压缩的情况
 func (rf *Raft) InstallSnapshotModel(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) {
 	// nextIndex is located in snapshot
-	leaderLogger.Printf("Node[%v] Term[%v] 向Node[%v] 发送快照包 LastIncludedIndex[%v] LastIncludedTern[%v]", rf.me, rf.currentTerm, server, args.LastIncludedIndex, args.LastIncludedTerm)
+	DPrintf(leader, "Node[%v] Term[%v] 向Node[%v] 发送快照包 LastIncludedIndex[%v] LastIncludedTern[%v]", rf.me, rf.currentTerm, server, args.LastIncludedIndex, args.LastIncludedTerm)
 	for ok, times := false, 0; !ok && times < 3; times++ {
 		//重试三次
 		ok = rf.sendInstallSnapshot(server, args, reply)
@@ -750,7 +714,7 @@ func (rf *Raft) InstallSnapshotModel(server int, args *InstallSnapshotArgs, repl
 			//收到了响应
 			if reply.Term > rf.currentTerm {
 				//收到了更大的Term
-				leaderLogger.Printf("Node[%v] Term[%v] 变更为follower节点，因为server[%v] reply.Term[%v] > rf.currentTerm[%v] 重试测试为[%v]", rf.me, rf.currentTerm, server, reply.Term, rf.currentTerm, times)
+				DPrintf(leader, "Node[%v] Term[%v] 变更为follower节点，因为server[%v] reply.Term[%v] > rf.currentTerm[%v] 重试测试为[%v]", rf.me, rf.currentTerm, server, reply.Term, rf.currentTerm, times)
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
 				rf.state = FOLLOWER
@@ -760,7 +724,7 @@ func (rf *Raft) InstallSnapshotModel(server int, args *InstallSnapshotArgs, repl
 				rf.nextIndex[server] = max(rf.nextIndex[server], args.LastIncludedIndex+1)
 				rf.matchIndex[server] = rf.nextIndex[server] - 1
 				rf.checkAndCommit()
-				leaderLogger.Printf("Node[%v] Term[%v] 向Node[%v] 发送快照包成功 Next变更为[%v] LastIncludedIndex[%v] LastIncludedTern[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], args.LastIncludedIndex, args.LastIncludedTerm)
+				DPrintf(leader, "Node[%v] Term[%v] 向Node[%v] 发送快照包成功 Next变更为[%v] LastIncludedIndex[%v] LastIncludedTern[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], args.LastIncludedIndex, args.LastIncludedTerm)
 			}
 			rf.persist()
 			rf.mu.Unlock()
@@ -774,7 +738,7 @@ func (rf *Raft) InstallSnapshotModel(server int, args *InstallSnapshotArgs, repl
 
 //heartbeat 同步发送心跳给指定的server
 func (rf *Raft) heartbeat(server int) {
-	//logger.Printf("%d->%d\n", rf.me, server)
+	//DPrintf(common,"%d->%d\n", rf.me, server)
 	args := AppendEntriesArgs{Term: -1, LeaderCommit: rf.commitIndex, PrevLogTerm: -1, PrevLogIndex: -1, LeaderId: rf.me}
 	reply := AppendEntriesReply{}
 	rf.mu.Lock()
@@ -798,23 +762,23 @@ func (rf *Raft) heartbeat(server int) {
 		return
 	}
 	//检查是否需要传入log
-	//debugger.Printf("Node[%v] 检查是否需要向Node[%v] 传入日志，rf.logNum-1：[%v] >= rf.nextIndex[server]：[%v]", rf.me, server, rf.logNum-1, rf.nextIndex[server])
+	//DPrintf(debug,"Node[%v] 检查是否需要向Node[%v] 传入日志，rf.logNum-1：[%v] >= rf.nextIndex[server]：[%v]", rf.me, server, rf.logNum-1, rf.nextIndex[server])
 	args.Term = rf.currentTerm
 	rf.appendLog(server, &args)
-	leaderLogger.Printf("Node[%v] term[%v] 向Node[%v] 追加日志,LeaderCommit[%v], nextIndex[server]:%v,rf.logNum:%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, args.LeaderCommit, rf.nextIndex[server], rf.logNum, len(args.Entries), args.Entries)
+	DPrintf(leader, "Node[%v] term[%v] 向Node[%v] 追加日志,LeaderCommit[%v], nextIndex[server]:%v,rf.logNum:%v,len(entries):[%v],logs:[%v]", rf.me, rf.currentTerm, server, args.LeaderCommit, rf.nextIndex[server], rf.logNum, len(args.Entries), args.Entries)
 	rf.mu.Unlock()
 	if ok := rf.sendAppendEntries(server, &args, &reply); !ok {
-		//leaderLogger.Printf("Node[%d]心跳丢失->Node[%d]\n", rf.me, server)
+		//DPrintf(leader,"Node[%d]心跳丢失->Node[%d]\n", rf.me, server)
 		return
 	}
 	rf.mu.Lock()
 	if rf.state != LEADER {
-		logger.Printf("Node[%v] Term[%v] 收到发送给Node[%v]的延迟消息 但是已经不是leader身份 选择忽略", rf.me, rf.currentTerm, server)
+		DPrintf(common, "Node[%v] Term[%v] 收到发送给Node[%v]的延迟消息 但是已经不是leader身份 选择忽略", rf.me, rf.currentTerm, server)
 		rf.mu.Unlock()
 		return
 	}
 	if reply.Term > rf.currentTerm {
-		leaderLogger.Printf("Node[%v] Term[%v] 变更为follower节点，因为reply.Term[%v] > rf.currentTerm[%v]", rf.me, rf.currentTerm, reply.Term, rf.currentTerm)
+		DPrintf(leader, "Node[%v] Term[%v] 变更为follower节点，因为reply.Term[%v] > rf.currentTerm[%v]", rf.me, rf.currentTerm, reply.Term, rf.currentTerm)
 		rf.currentTerm = reply.Term
 		rf.votedFor = -1
 		rf.state = FOLLOWER
@@ -825,7 +789,7 @@ func (rf *Raft) heartbeat(server int) {
 	}
 	//发生了log的复制
 	if reply.Success {
-		leaderLogger.Printf("Node[%v] Term[%v] 向server[%v] 日志复制成功,log:%v", rf.me, rf.currentTerm, server, args.Entries)
+		DPrintf(leader, "Node[%v] Term[%v] 向server[%v] 日志复制成功,log:%v", rf.me, rf.currentTerm, server, args.Entries)
 		//日志复制成功
 		//新的nextIndex为原来的nextIndex[server](PrevLogIndex+1)+len(args.Entries)
 		//由于是个高并发问题，可能这里已经被更新了
@@ -844,7 +808,7 @@ func (rf *Raft) heartbeat(server int) {
 			newPrevLogIndex--
 		}
 		rf.nextIndex[server] = min(newPrevLogIndex, rf.nextIndex[server])
-		leaderLogger.Printf("Node[%v] Term[%v] 日志复制失败 更新Node[%v] 的nextIndex为[%v] ConflictLogIndex[%v] ConflictLogTerm[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], reply.ConflictLogIndex, reply.ConflictLogTerm)
+		DPrintf(leader, "Node[%v] Term[%v] 日志复制失败 更新Node[%v] 的nextIndex为[%v] ConflictLogIndex[%v] ConflictLogTerm[%v]", rf.me, rf.currentTerm, server, rf.nextIndex[server], reply.ConflictLogIndex, reply.ConflictLogTerm)
 	}
 	rf.mu.Unlock()
 	return
@@ -854,7 +818,7 @@ func (rf *Raft) heartbeat(server int) {
 //leader的状态转化
 //定期发送心跳广播
 func (rf *Raft) startLeaderAction() {
-	leaderLogger.Printf("Node[%v]号成为leader Term[%v] 状态为:%v\n", rf.me, rf.currentTerm, rf)
+	DPrintf(leader, "Node[%v]号成为leader Term[%v] 状态为:%v\n", rf.me, rf.currentTerm, rf)
 	rf.mu.Lock()
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
@@ -884,7 +848,7 @@ func (rf *Raft) startLeaderAction() {
 			break
 		}
 		rf.mu.RUnlock()
-		//logger.Printf("%d - %d - %d\n", rf.me, rf.currentTerm, rf.state)
+		//DPrintf(common,"%d - %d - %d\n", rf.me, rf.currentTerm, rf.state)
 		broadcast()
 		rf.heartbeatTimer.Reset(HEARTBEAT_INTERVAL)
 		<-rf.heartbeatTimer.C
@@ -915,7 +879,7 @@ func (rf *Raft) elections() {
 			continue
 		}
 		//异步拉票
-		candidateLogger.Printf("Node[%v] Term[%v] 拉票于[%v]", rf.me, rf.currentTerm, i)
+		DPrintf(candidate, "Node[%v] Term[%v] 拉票于[%v]", rf.me, rf.currentTerm, i)
 		go func(i int) {
 			reply := RequestVoteReply{}
 			if ok := rf.sendRequestVote(i, &requestVoteArg, &reply); !ok {
@@ -926,7 +890,7 @@ func (rf *Raft) elections() {
 			}
 			rf.mu.Lock()
 			if reply.Term > rf.currentTerm {
-				candidateLogger.Printf("Node[%d]拉票于Node[%d]失败，变为follower\n", rf.me, i)
+				DPrintf(candidate, "Node[%d]拉票于Node[%d]失败，变为follower\n", rf.me, i)
 				// If RPC response contains term T > currentTerm:
 				// set currentTerm = T, convert to follower
 				rf.currentTerm = reply.Term
@@ -936,7 +900,7 @@ func (rf *Raft) elections() {
 				rf.mu.Unlock()
 				return
 			}
-			candidateLogger.Printf("Node[%d]拉票于Node[%d]成功,结果为[%v]，任期为[%d]\n", rf.me, i, reply.VoteGranted, rf.currentTerm)
+			DPrintf(candidate, "Node[%d]拉票于Node[%d]成功,结果为[%v]，任期为[%d]\n", rf.me, i, reply.VoteGranted, rf.currentTerm)
 			rf.mu.Unlock()
 			voteCh <- reply.VoteGranted
 		}(i)
@@ -1007,9 +971,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	if rf.lastIncludedIndex > 0 {
 		rf.lastApplied = rf.lastIncludedIndex
 	}
+	DPrintf(common, "Node[%v] 初始化完成 状态为[%v]", me, rf)
 	go rf.commandLog()
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	logger.Println(me, "初始化完成", rf, rf.lastApplied, rf.lastIncludedIndex)
 	return rf
 }

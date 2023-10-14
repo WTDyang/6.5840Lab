@@ -17,24 +17,24 @@ type LogRWMutex struct {
 
 func (l *LogRWMutex) Lock() {
 	uid := generateUID()
-	lockLogger.Printf("%s Node[%v] LOCK[%v] 尝试获取锁", getFileLocation(), l.raftId, uid)
+	DPrintf(lock, "%s Node[%v] LOCK[%v] 尝试获取锁", getFileLocation(), l.raftId, uid)
 	l.mu.Lock()
 	l.uid = uid
-	lockLogger.Printf("%s Node[%v] LOCK[%v] LOCK", getFileLocation(), l.raftId, uid)
+	DPrintf(lock, "%s Node[%v] LOCK[%v] LOCK", getFileLocation(), l.raftId, uid)
 }
 
 func (l *LogRWMutex) Unlock() {
-	lockLogger.Printf("%s Node[%v] LOCK[%v] UNLOCK", getFileLocation(), l.raftId, l.uid)
+	DPrintf(lock, "%s Node[%v] LOCK[%v] UNLOCK", getFileLocation(), l.raftId, l.uid)
 	l.mu.Unlock()
 }
 func (l *LogRWMutex) RLock() {
 	uid := generateUID()
 	l.mu.RLock()
 	l.uid = uid
-	lockLogger.Printf("%s Node[%v] RLOCK[%v] LOCK", getFileLocation(), l.raftId, uid)
+	DPrintf(lock, "%s Node[%v] RLOCK[%v] LOCK", getFileLocation(), l.raftId, uid)
 }
 func (l *LogRWMutex) RUnlock() {
-	lockLogger.Printf("%s Node[%v] RLOCK[%v] UNLOCK", getFileLocation(), l.raftId, l.uid)
+	DPrintf(lock, "%s Node[%v] RLOCK[%v] UNLOCK", getFileLocation(), l.raftId, l.uid)
 	l.mu.RUnlock()
 }
 func getFileLocation() string {

@@ -2,17 +2,49 @@ package raft
 
 import (
 	"crypto/rand"
+	"io"
 	"log"
 	"math/big"
+	"os"
 	"time"
 )
 
-// Debugging
-const Debug = false
+type logTopic string
 
-func DPrintf(format string, a ...interface{}) (n int, err error) {
+const (
+	common    = "[COMMON]\t"
+	follower  = "[FOLLOWER]\t"
+	leader    = "[LEADER]\t"
+	candidate = "[CANDIDATE]\t"
+	debug     = "[DEBUG]\t"
+	lock      = "[LOCK]\t"
+	rpc       = "[RPC]\t"
+)
+
+var logger *log.Logger
+
+func init() {
+	writer, err := os.OpenFile("log.log", os.O_WRONLY|os.O_TRUNC|os.O_CREATE, 0755) //覆盖
+	if err != nil {
+		log.Fatalf("create file log.txt failed: %v", err)
+	}
+	title := "|--------------------------------------------------------------------------------------------|\n" +
+		"|--------------------" + time.Now().String() + "---------------------|\n" +
+		"|--------------------------------------------------------------------------------------------|\n"
+	_, err = writer.WriteString(title)
+	if err != nil {
+		log.Fatalf("write the title failed: %v", err)
+	}
+	logger = log.New(io.MultiWriter(writer), "", log.Lshortfile|log.Ldate|log.Lmicroseconds)
+}
+
+// Debugging
+const Debug = true
+
+func DPrintf(topic logTopic, format string, a ...interface{}) (n int, err error) {
 	if Debug {
-		log.Printf(format, a...)
+		format = string(topic) + format
+		logger.Printf(format, a...)
 	}
 	return
 }

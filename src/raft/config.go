@@ -170,7 +170,7 @@ func (cfg *config) applier(i int, applyCh chan ApplyMsg) {
 				err_msg = fmt.Sprintf("server %v apply out of order %v", i, m.CommandIndex)
 			}
 			if err_msg != "" {
-				debugger.Printf(err_msg)
+				DPrintf(debug, err_msg)
 				log.Fatalf("apply error: %v", err_msg)
 				cfg.applyErr[i] = err_msg
 				// keep reading after error so that Raft doesn't block
@@ -204,7 +204,7 @@ func (cfg *config) ingestSnap(i int, snapshot []byte, index int) string {
 		cfg.logs[i][j] = xlog[j]
 	}
 	cfg.lastApplied[i] = lastIncludedIndex
-	debugger.Printf("更新状态Node[%v] lastIncludedIndex[%v] s:%v", i, lastIncludedIndex, getFileLocation())
+	DPrintf(debug, "更新状态Node[%v] lastIncludedIndex[%v] s:%v", i, lastIncludedIndex, getFileLocation())
 	return ""
 }
 
@@ -223,11 +223,11 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 		err_msg := ""
 		if m.SnapshotValid {
 			cfg.mu.Lock()
-			debugger.Printf("GET SNAPSHOT MESSAGE NODE[%v] MAG:%v", rf.me, m)
+			DPrintf(debug, "GET SNAPSHOT MESSAGE NODE[%v] MAG:%v", rf.me, m)
 			err_msg = cfg.ingestSnap(i, m.Snapshot, m.SnapshotIndex)
 			cfg.mu.Unlock()
 		} else if m.CommandValid {
-			debugger.Printf("GET COMMAND MESSAGE NODE[%v] lastApplied[%v] MAG:%v", rf.me, cfg.lastApplied[i], m)
+			DPrintf(debug, "GET COMMAND MESSAGE NODE[%v] lastApplied[%v] MAG:%v", rf.me, cfg.lastApplied[i], m)
 			if m.CommandIndex != cfg.lastApplied[i]+1 {
 				err_msg = fmt.Sprintf("server %v apply out of order, expected index %v, got %v", i, cfg.lastApplied[i]+1, m.CommandIndex)
 			}
@@ -244,7 +244,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 
 			cfg.mu.Lock()
 			cfg.lastApplied[i] = m.CommandIndex
-			debugger.Printf("更新状态Node[%v] lastIncludedIndex[%v] lastApplied[%v]", rf.me, m.CommandIndex, cfg.lastApplied[i])
+			DPrintf(debug, "更新状态Node[%v] lastIncludedIndex[%v] lastApplied[%v]", rf.me, m.CommandIndex, cfg.lastApplied[i])
 			cfg.mu.Unlock()
 
 			if (m.CommandIndex+1)%SnapShotInterval == 0 {
@@ -359,7 +359,7 @@ func (cfg *config) cleanup() {
 
 // attach server i to the net.
 func (cfg *config) connect(i int) {
-	debugger.Printf("connect(%d)\n", i)
+	DPrintf(debug, "connect(%d)\n", i)
 
 	cfg.connected[i] = true
 
@@ -383,7 +383,7 @@ func (cfg *config) connect(i int) {
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
 	// fmt.Printf("disconnect(%d)\n", i)
-	debugger.Printf("disconnect(%d)\n", i)
+	DPrintf(debug, "disconnect(%d)\n", i)
 	cfg.connected[i] = false
 
 	// outgoing ClientEnds
@@ -513,7 +513,7 @@ func (cfg *config) nCommitted(index int) (int, interface{}) {
 			cmd = cmd1
 		}
 	}
-	debugger.Printf("KEY VARIABLE count[%v] cmd[%v] hub:%v", count, cmd, serverHub)
+	DPrintf(debug, "KEY VARIABLE count[%v] cmd[%v] hub:%v", count, cmd, serverHub)
 	return count, cmd
 }
 
@@ -579,7 +579,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 				index1, _, ok := rf.Start(cmd)
 				if ok {
 					index = index1
-					debugger.Printf("KEY STEP:find the leader[%v],the index of log is[%v],log:%v", si, index, cmd)
+					DPrintf(debug, "KEY STEP:find the leader[%v],the index of log is[%v],log:%v", si, index, cmd)
 					break
 				}
 			}
@@ -590,9 +590,9 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			t1 := time.Now()
 			for time.Since(t1).Seconds() < 2 {
 				nd, cmd1 := cfg.nCommitted(index)
-				debugger.Printf("KEY VARIABLE: nd[%v], cmd1[%v] expectedServers[%v]", nd, cmd1, expectedServers)
+				DPrintf(debug, "KEY VARIABLE: nd[%v], cmd1[%v] expectedServers[%v]", nd, cmd1, expectedServers)
 				if nd > 0 && nd >= expectedServers {
-					debugger.Printf("KEY VARIABLE: cmd1[%v], cmd[%v]", cmd1, cmd)
+					DPrintf(debug, "KEY VARIABLE: cmd1[%v], cmd[%v]", cmd1, cmd)
 					// committed
 					if cmd1 == cmd {
 						// and it was the command we submitted.
@@ -607,7 +607,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
-		debugger.Printf("客户端准备重试 传入命令[%v]", cmd)
+		DPrintf(debug, "客户端准备重试 传入命令[%v]", cmd)
 	}
 	if cfg.checkFinished() == false {
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
