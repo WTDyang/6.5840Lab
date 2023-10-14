@@ -563,6 +563,7 @@ func (cfg *config) wait(index int, n int, startTerm int) interface{} {
 func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 	t0 := time.Now()
 	starts := 0
+	DPrintf(debug, "KEY STEP:客户端正在尝试传入命令[%v]", cmd)
 	//time.Sleep(2 * time.Second)
 	for time.Since(t0).Seconds() < 10 && cfg.checkFinished() == false {
 		// try all the servers, maybe one is the leader.

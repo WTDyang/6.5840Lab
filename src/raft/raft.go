@@ -26,12 +26,10 @@ import (
 	"6.5840/labrpc"
 )
 
-type STATE string
-
 const (
-	FOLLOWER  STATE = "FOLLOWER"
-	CANDIDATE STATE = "CANDIDATE"
-	LEADER    STATE = "LEADER"
+	FOLLOWER  int32 = 0
+	CANDIDATE int32 = 1
+	LEADER    int32 = 2
 )
 
 // HEARTBEAT_INTERVAL 心跳间隔100ms
@@ -78,7 +76,7 @@ type Raft struct {
 	currentTerm    int         //latest term server has seen (initialized to 0	on first boot, increases monotonically)
 	votedFor       int         //candidateId that received vote in current	term (or null if none)
 	logs           []LogEntry  //log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1
-	state          STATE       //enum for state(follower , candidate and leader)
+	state          int32       //enum for state(follower , candidate and leader)
 	electionTimer  *time.Timer //timeout
 	heartbeatTimer *time.Timer //heartbeatTimer
 
@@ -111,8 +109,9 @@ type AppendEntriesArgs struct {
 
 // AppendEntriesReply result for AppendEntries RPC
 type AppendEntriesReply struct {
-	Term    int  //currentTerm,for leader to update itself
-	Success bool //true if follower contained entry matching prevLogIndex and prevLogTerm
+	Term                int  //currentTerm,for leader to update itself
+	Success             bool //true if follower contained entry matching prevLogIndex and prevLogTerm
+	LastIncludeLogIndex int  //最后一条日志的Index，如果之前的日志发生了快照提交，则使用这个变量重置next
 
 	Conflict         bool //true if conflict happened
 	ConflictLogTerm  int  //the term of log which is conflict
@@ -168,6 +167,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 	rf.electionTimer.Reset(randomElectionTimeout())
 	DPrintf(follower, "Node[%v] term[%v] 心跳刷新", rf.me, args.Term)
+
+	if args.PrevLogIndex < rf.lastIncludedIndex {
+		reply.Term, reply.LastIncludeLogIndex, reply.Success = rf.currentTerm, rf.lastIncludedIndex, true
+		DPrintf(follower, "Node[%v] 选择忽略Node[%v]的日志 因为PrevLogIndex[%v] < lastIncludedIndex[%v] 说明是个过时RPC", rf.me, args.LeaderId, args.PrevLogIndex, rf.lastIncludedIndex)
+		return
+	}
+
 	//follower 在prevLogIndex 位置没有entry
 	if args.PrevLogIndex > rf.getLastLogIndex() {
 		reply.Term, reply.Success = rf.currentTerm, false
@@ -255,7 +261,8 @@ func (rf *Raft) commandLog() {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 	var term int
 	var isleader bool
 	// Your code here (2A)
@@ -591,15 +598,19 @@ func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
+	if atomic.LoadInt32(&rf.state) != LEADER {
+		return -1, -1, false
+	}
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	index := rf.getLastLogIndex() + 1
-	term := rf.currentTerm
+	rf.mu.Unlock()
+
 	isLeader := rf.state == LEADER
 	if !isLeader {
-		//不是leader不处理，直接返回
-		return index, term, isLeader
+		//二次判断
+		return -1, -1, isLeader
 	}
+	index := rf.getLastLogIndex() + 1
+	term := rf.currentTerm
 
 	LogEntry := LogEntry{
 		Index:   index,
@@ -625,6 +636,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.electionTimer.Stop()
+	rf.heartbeatTimer.Stop()
 	DPrintf(common, "Node[%v] 死掉了 属性为:%v", rf.me, rf)
 }
 
@@ -772,7 +785,7 @@ func (rf *Raft) heartbeat(server int) {
 		return
 	}
 	rf.mu.Lock()
-	if rf.state != LEADER {
+	if rf.state != LEADER || rf.currentTerm != args.Term {
 		DPrintf(common, "Node[%v] Term[%v] 收到发送给Node[%v]的延迟消息 但是已经不是leader身份 选择忽略", rf.me, rf.currentTerm, server)
 		rf.mu.Unlock()
 		return
@@ -789,6 +802,13 @@ func (rf *Raft) heartbeat(server int) {
 	}
 	//发生了log的复制
 	if reply.Success {
+		if reply.LastIncludeLogIndex > 0 {
+			//follower的最后一条日志不为0，就是发生了快照压缩
+			rf.nextIndex[server] = max(rf.nextIndex[server], reply.LastIncludeLogIndex)
+			DPrintf(leader, "Node[%v] Term[%v] 发送给server[%v] prevLogIndex[%v] 已经被压缩了 next重置到[%v]", rf.me, rf.currentTerm, server, args.PrevLogIndex, rf.nextIndex[server])
+			rf.mu.Unlock()
+			return
+		}
 		DPrintf(leader, "Node[%v] Term[%v] 向server[%v] 日志复制成功,log:%v", rf.me, rf.currentTerm, server, args.Entries)
 		//日志复制成功
 		//新的nextIndex为原来的nextIndex[server](PrevLogIndex+1)+len(args.Entries)
@@ -866,6 +886,8 @@ func (rf *Raft) elections() {
 
 	requestVoteArg := RequestVoteArgs{LastLogTerm: -1, LastLogIndex: -1, CandidateId: rf.me}
 	rf.mu.RLock()
+	me := rf.me
+	peers := rf.peers
 	if rf.logNum > 0 {
 		requestVoteArg.LastLogTerm = rf.getLog(rf.getLastLogIndex()).Term
 		requestVoteArg.LastLogIndex = rf.getLastLogIndex()
@@ -873,9 +895,9 @@ func (rf *Raft) elections() {
 	requestVoteArg.Term = rf.currentTerm
 	rf.mu.RUnlock()
 
-	voteCh := make(chan bool, len(rf.peers)-1)
-	for i := range rf.peers { // Send RequestVote RPCs to all other servers
-		if i == rf.me { // in PARALLEL
+	voteCh := make(chan bool, len(peers)-1)
+	for i := range peers { // Send RequestVote RPCs to all other servers
+		if i == me { // in PARALLEL
 			continue
 		}
 		//异步拉票
@@ -913,8 +935,9 @@ func (rf *Raft) elections() {
 		voteCnt++
 		rf.mu.RLock()
 		state := rf.state
+		currentTerm := rf.currentTerm
 		rf.mu.RUnlock()
-		if state != CANDIDATE || rf.currentTerm > requestVoteArg.Term {
+		if state != CANDIDATE || currentTerm > requestVoteArg.Term {
 			//推出了选举或者是rpc延迟导致失效
 			break
 		}
@@ -931,7 +954,7 @@ func (rf *Raft) elections() {
 			break
 		}
 
-		if voteCnt == len(rf.peers) {
+		if voteCnt == len(peers) {
 			// election completed without getting enough votes, break
 			break
 		}
@@ -968,6 +991,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.heartbeatTimer = time.NewTimer(10 * time.Millisecond)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.snapshot = persister.ReadSnapshot()
 	if rf.lastIncludedIndex > 0 {
 		rf.lastApplied = rf.lastIncludedIndex
 	}
