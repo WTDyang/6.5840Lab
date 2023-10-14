@@ -32,8 +32,8 @@ const (
 	LEADER    int32 = 2
 )
 
-// HEARTBEAT_INTERVAL 心跳间隔100ms
-const HEARTBEAT_INTERVAL = 100 * time.Millisecond
+// HEARTBEAT_INTERVAL 心跳间隔105ms
+const HEARTBEAT_INTERVAL = 105 * time.Millisecond
 
 // LogEntry 日志实体结构
 type LogEntry struct {
