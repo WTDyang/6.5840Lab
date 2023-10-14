@@ -812,7 +812,7 @@ func (rf *Raft) heartbeat(server int) {
 	if reply.Success {
 		if reply.LastIncludeLogIndex > 0 {
 			//follower的最后一条日志不为0，就是发生了快照压缩
-			rf.nextIndex[server] = max(rf.nextIndex[server], reply.LastIncludeLogIndex)
+			rf.nextIndex[server] = max(rf.nextIndex[server], reply.LastIncludeLogIndex+1)
 			DPrintf(leader, "Node[%v] Term[%v] 发送给server[%v] prevLogIndex[%v] 已经被压缩了 next重置到[%v]", rf.me, rf.currentTerm, server, args.PrevLogIndex, rf.nextIndex[server])
 			rf.mu.Unlock()
 			return
