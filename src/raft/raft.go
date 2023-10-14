@@ -524,13 +524,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	//为了保证安全性，首先检验日志的合法性
 	//候选人应当包含所有已提交的日志条目
-	if rf.logNum > 0 {
+	if rf.logNum > 0 && (rf.votedFor == -1 || rf.votedFor == args.CandidateId) {
 		if rf.getLog(rf.getLastLogIndex()).Term > args.LastLogTerm {
 			//最后一条日志的任期号更大，则不投票，但是会根据term更新自己状态
 			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为最后日志任期号[%v]比候选者最后日志任期号[%v]更大", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.getLog(rf.getLastLogIndex()).Term, args.LastLogTerm)
 			reply.Term = args.Term
-			rf.votedFor = -1
-			rf.persist()
 			reply.VoteGranted = false
 			return
 		}
@@ -538,8 +536,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			//日志条目更多，也不更新
 			logger.Printf("Node[%v] Term[%v] 拒绝投票给Node[%v] Term[%v]，因为日志条目[%v]比候选者日志条目[%v]更多", rf.me, rf.currentTerm, args.CandidateId, args.Term, rf.logNum, args.LastLogIndex)
 			reply.VoteGranted = false
-			rf.votedFor = -1
-			rf.persist()
 			reply.Term = args.Term
 			return
 		}
