@@ -923,6 +923,11 @@ func (rf *Raft) elections() {
 				rf.mu.Unlock()
 				return
 			}
+			if rf.currentTerm != requestVoteArg.Term || rf.state != CANDIDATE {
+				rf.mu.Unlock()
+				voteCh <- false
+				return
+			}
 			DPrintf(candidate, "Node[%d]拉票于Node[%d]成功,结果为[%v]，任期为[%d]\n", rf.me, i, reply.VoteGranted, rf.currentTerm)
 			rf.mu.Unlock()
 			voteCh <- reply.VoteGranted
@@ -935,19 +940,22 @@ func (rf *Raft) elections() {
 		//计数+1
 		voteCnt++
 		rf.mu.RLock()
-		state := rf.state
-		currentTerm := rf.currentTerm
-		rf.mu.RUnlock()
-		if state != CANDIDATE || currentTerm > requestVoteArg.Term {
+		if rf.state != CANDIDATE || rf.currentTerm != requestVoteArg.Term {
 			//推出了选举或者是rpc延迟导致失效
+			rf.mu.RUnlock()
 			break
 		}
+		rf.mu.RUnlock()
 		if voteGranted {
 			voteGrantedCnt++
 		}
 		if voteGrantedCnt > len(rf.peers)/2 {
 			// gain over a half votes, switch to leader
 			rf.mu.Lock()
+			if rf.state != CANDIDATE || rf.currentTerm != requestVoteArg.Term {
+				rf.mu.Unlock()
+				break
+			}
 			rf.state = LEADER
 			rf.mu.Unlock()
 			//开始leader的动作(发送心跳)

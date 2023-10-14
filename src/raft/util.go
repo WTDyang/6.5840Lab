@@ -12,13 +12,13 @@ import (
 type logTopic string
 
 const (
-	common    = "[COMMON]\t"
-	follower  = "[FOLLOWER]\t"
-	leader    = "[LEADER]\t"
-	candidate = "[CANDIDATE]\t"
-	debug     = "[DEBUG]\t"
-	lock      = "[LOCK]\t"
-	rpc       = "[RPC]\t"
+	common    = "\t[COMMON]\t"
+	follower  = "\t[FOLLOWER]\t"
+	leader    = "\t[LEADER]\t"
+	candidate = "\t[CANDIDATE]\t"
+	debug     = "\t[DEBUG]\t"
+	lock      = "\t[LOCK]\t"
+	rpc       = "\t[RPC]\t"
 )
 
 var logger *log.Logger
@@ -35,15 +35,15 @@ func init() {
 	if err != nil {
 		log.Fatalf("write the title failed: %v", err)
 	}
-	logger = log.New(io.MultiWriter(writer), "", log.Lshortfile|log.Ldate|log.Lmicroseconds)
+	logger = log.New(io.MultiWriter(writer), "", log.Ldate|log.Lmicroseconds)
 }
 
 // Debugging
-const Debug = false
+const Debug = true
 
 func DPrintf(topic logTopic, format string, a ...interface{}) (n int, err error) {
 	if Debug {
-		format = string(topic) + format
+		format = getFileLocation() + string(topic) + format
 		logger.Printf(format, a...)
 	}
 	return
