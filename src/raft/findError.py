@@ -1,7 +1,7 @@
 import os
 with open("errors.log","w") as w:
     for i in range(1, 2001):
-        filename = f"test-{i}.log"  
+        filename = "test-%d.log" %i
         if not os.path.isfile(filename):  
             continue
         with open(filename, "r") as f:  
