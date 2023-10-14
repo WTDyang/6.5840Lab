@@ -6,4 +6,3 @@ log.txt
 *.log
 failed_log.txt
 *.tmp
-*.py

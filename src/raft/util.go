@@ -39,7 +39,7 @@ func init() {
 }
 
 // Debugging
-const Debug = true
+const Debug = false
 
 func DPrintf(topic logTopic, format string, a ...interface{}) (n int, err error) {
 	if Debug {
