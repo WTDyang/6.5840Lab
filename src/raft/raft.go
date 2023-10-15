@@ -86,7 +86,8 @@ type Raft struct {
 	matchIndex  []int         //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
 	applyCh     chan ApplyMsg //chan to apply
 	commitFlag  chan struct{} //用来触发提交日志
-	deadFlag    chan struct{}
+	tickerDone  chan struct{}
+	commitDone  chan struct{}
 
 	logNum            int           //日志的总数
 	lastIncludedIndex int           //已压缩的日志最后一条的索引
@@ -140,11 +141,11 @@ func (rf *Raft) getLastLogIndex() int {
 // AppendEntries Invoked by leader to replicate log entries; also used as heartbeat
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	DPrintf(common, "Node[%v] Term[%v] 接收到Node[%v] Term[%v]心跳", rf.me, rf.currentTerm, args.LeaderId, args.Term)
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if rf.killed() {
 		return
 	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
 		//DPrintf(common,"%d屈服于%d(1),term:(%d,%d)\n", args.LeaderId, rf.me, rf.currentTerm, args.Term)
 		// Reply false if term < currentTerm
@@ -233,7 +234,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 //顺序提交日志
 func (rf *Raft) commandLog() {
 	//只要没有被回收就一直提交日志
-	for !rf.killed() {
+	for {
 		select {
 		case <-rf.commitFlag:
 			//启动一次提交检查
@@ -255,7 +256,8 @@ func (rf *Raft) commandLog() {
 				rf.applyCh <- applyMsg
 				DPrintf(common, "Node[%v] Term[%v] state[%v],已提交日志 ApplyMsg:%v", rf.me, rf.currentTerm, rf.state, applyMsg)
 			}
-		case <-rf.deadFlag:
+		case <-rf.commitDone:
+			close(rf.commitDone)
 			return
 		}
 	}
@@ -292,7 +294,7 @@ func (rf *Raft) persist() {
 	}
 	data := w.Bytes()
 	rf.persister.SaveRaftState(data)
-	DPrintf(common, "%v Node[%v] writePersist lastIncludedIndex[%v] raft:%v", getFileLocation(), rf.me, rf.lastIncludedIndex, rf)
+	DPrintf(common, "%v Node[%v] writePersist lastIncludedIndex[%v] raft-logs:%v", getFileLocation(), rf.me, rf.lastIncludedIndex, rf.logs)
 }
 
 // restore previously persisted state.
@@ -319,7 +321,7 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.lastIncludedIndex = lastIncludedIndex
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.logNum = logNum
-	DPrintf(common, "Node[%v] readPersist raft:%v", rf.me, rf)
+	DPrintf(common, "Node[%v] readPersist raft-logs:%v", rf.me, rf.logs)
 }
 
 // the service says it has created a snapshot that has
@@ -477,6 +479,9 @@ type RequestVoteReply struct {
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
+	if rf.killed() {
+		return
+	}
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if args.Term < rf.currentTerm {
@@ -641,14 +646,14 @@ func (rf *Raft) isLeader() bool {
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	//关闭ticker和commandLog
+	go func() {
+		rf.commitDone <- struct{}{}
+		rf.tickerDone <- struct{}{}
+	}()
 	// Your code here, if desired.
 	rf.electionTimer.Stop()
 	rf.heartbeatTimer.Stop()
-	//关闭ticker和commandLog
-	go func() {
-		rf.deadFlag <- struct{}{}
-		rf.deadFlag <- struct{}{}
-	}()
 	DPrintf(common, "Node[%v] 死掉了 属性为:%v", rf.me, rf)
 }
 
@@ -658,7 +663,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
-	for rf.killed() == false {
+	for {
 		// Your code here (2A)
 		// Check if a leader election should be started.
 		select {
@@ -673,7 +678,8 @@ func (rf *Raft) ticker() {
 			rf.state = CANDIDATE
 			rf.mu.Unlock()
 			go rf.elections()
-		case <-rf.deadFlag:
+		case <-rf.tickerDone:
+			close(rf.tickerDone)
 			return
 		}
 		// pause for a random amount of time between 50 and 350
@@ -1003,7 +1009,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER //初始化为follower节点
 	rf.commitFlag = make(chan struct{})
 	rf.snapshotFlag = make(chan ApplyMsg)
-	rf.deadFlag = make(chan struct{})
+	rf.tickerDone = make(chan struct{})
+	rf.commitDone = make(chan struct{})
 	rf.logs = make([]LogEntry, 1)
 	rf.mu = LogRWMutex{raftId: me}
 	// Your initialization code here (2A, 2B, 2C).

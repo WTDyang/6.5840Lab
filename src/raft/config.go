@@ -609,7 +609,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		} else {
 			time.Sleep(50 * time.Millisecond)
 		}
-		DPrintf(debug, "客户端准备重试 传入命令[%v]", cmd)
+		DPrintf(debug, "客户端准备重试 传入命令[%v] 上次传入位置[%v](-1表示未提交)", cmd, index)
 	}
 	if cfg.checkFinished() == false {
 		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
