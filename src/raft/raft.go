@@ -86,6 +86,7 @@ type Raft struct {
 	matchIndex  []int         //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
 	applyCh     chan ApplyMsg //chan to apply
 	commitFlag  chan struct{} //用来触发提交日志
+	deadFlag    chan struct{}
 
 	logNum            int           //日志的总数
 	lastIncludedIndex int           //已压缩的日志最后一条的索引
@@ -254,6 +255,8 @@ func (rf *Raft) commandLog() {
 				rf.applyCh <- applyMsg
 				DPrintf(common, "Node[%v] Term[%v] state[%v],已提交日志 ApplyMsg:%v", rf.me, rf.currentTerm, rf.state, applyMsg)
 			}
+		case <-rf.deadFlag:
+			return
 		}
 	}
 }
@@ -641,6 +644,11 @@ func (rf *Raft) Kill() {
 	// Your code here, if desired.
 	rf.electionTimer.Stop()
 	rf.heartbeatTimer.Stop()
+	//关闭ticker和commandLog
+	go func() {
+		rf.deadFlag <- struct{}{}
+		rf.deadFlag <- struct{}{}
+	}()
 	DPrintf(common, "Node[%v] 死掉了 属性为:%v", rf.me, rf)
 }
 
@@ -665,6 +673,8 @@ func (rf *Raft) ticker() {
 			rf.state = CANDIDATE
 			rf.mu.Unlock()
 			go rf.elections()
+		case <-rf.deadFlag:
+			return
 		}
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
@@ -993,6 +1003,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER //初始化为follower节点
 	rf.commitFlag = make(chan struct{})
 	rf.snapshotFlag = make(chan ApplyMsg)
+	rf.deadFlag = make(chan struct{})
 	rf.logs = make([]LogEntry, 1)
 	rf.mu = LogRWMutex{raftId: me}
 	// Your initialization code here (2A, 2B, 2C).

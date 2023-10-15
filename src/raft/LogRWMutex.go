@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"sync"
 )
 
@@ -40,13 +41,13 @@ func (l *LogRWMutex) RUnlock() {
 func getFileLocation() string {
 	pc, file, line, ok := runtime.Caller(2)
 	if !ok {
-		file = "unknown"
+		file = "unknown  "
 		line = 0
 	}
 	funcName := runtime.FuncForPC(pc).Name()
 	// 获取短文件名
-	shortFile := filepath.Base(file)
-	return fmt.Sprintf("%s:%d, function: %s", shortFile, line, funcName)
+	shortFile := filepath.Base(file) + ":" + strconv.Itoa(line)
+	return fmt.Sprintf("%-16s, function: %-20s  ", shortFile, funcName)
 }
 func generateUID() int64 {
 	// 生成 8 字节的随机字节序列

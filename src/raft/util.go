@@ -6,19 +6,21 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 )
 
 type logTopic string
 
 const (
-	common    = "\t[COMMON]\t"
-	follower  = "\t[FOLLOWER]\t"
-	leader    = "\t[LEADER]\t"
-	candidate = "\t[CANDIDATE]\t"
-	debug     = "\t[DEBUG]\t"
-	lock      = "\t[LOCK]\t"
-	rpc       = "\t[RPC]\t"
+	common    = "[COMMON]    "
+	follower  = "[FOLLOWER]  "
+	leader    = "[LEADER]    "
+	candidate = "[CANDIDATE] "
+	debug     = "[DEBUG]     "
+	lock      = "[LOCK]      "
+	rpc       = "[RPC]       "
 )
 
 var logger *log.Logger
@@ -35,16 +37,28 @@ func init() {
 	if err != nil {
 		log.Fatalf("write the title failed: %v", err)
 	}
-	logger = log.New(io.MultiWriter(writer), "", log.Ldate|log.Lmicroseconds)
+	logger = log.New(io.MultiWriter(writer), "", 0)
 }
 
 // Debugging
-const Debug = false
+const Debug = true
 
 func DPrintf(topic logTopic, format string, a ...interface{}) (n int, err error) {
 	if Debug {
-		format = getFileLocation() + string(topic) + format
-		logger.Printf(format, a...)
+		currentTime := time.Now()
+		timeStr := currentTime.Format("2006-01-02 15:04:05")
+		builder := strings.Builder{}
+		builder.WriteString(string(topic))
+		builder.WriteString(timeStr)
+		builder.WriteString("  Stamp:")
+		builder.WriteString(strconv.FormatInt(currentTime.UnixMicro(), 10))
+		builder.WriteString("  ")
+		if topic != lock {
+			builder.WriteString(getFileLocation())
+		}
+		builder.WriteString(format)
+		logFormat := builder.String()
+		logger.Printf(logFormat, a...)
 	}
 	return
 }
