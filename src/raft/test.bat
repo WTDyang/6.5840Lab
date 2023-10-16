@@ -10,7 +10,7 @@ for /l %%i in (1, 1, %test_count%) do (
 
     echo Running test iteration %%i ...
 
-    go test -run TestFigure8Unreliable2C > log.tmp
+    go test -run TestPersist22C > log.tmp
 
     rename log.tmp log%%i.log
 

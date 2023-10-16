@@ -500,7 +500,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 		rf.persist()
-		rf.electionTimer.Reset(randomElectionTimeout())
+		//rf.electionTimer.Reset(randomElectionTimeout())
 	}
 	//为了保证安全性，首先检验日志的合法性
 	//候选人应当包含所有已提交的日志条目
@@ -670,12 +670,13 @@ func (rf *Raft) ticker() {
 		select {
 		case <-rf.electionTimer.C:
 			rf.mu.Lock()
-			DPrintf(common, "Node[%v] Term[%v]超时,身份是[%v]\n", rf.me, rf.currentTerm, rf.state)
 			if rf.state == LEADER {
 				//if is a leader:beak
+				rf.electionTimer.Reset(randomElectionTimeout())
 				rf.mu.Unlock()
 				break
 			}
+			DPrintf(common, "Node[%v] Term[%v]超时,身份是[%v]\n", rf.me, rf.currentTerm, rf.state)
 			rf.state = CANDIDATE
 			rf.mu.Unlock()
 			go rf.elections()
