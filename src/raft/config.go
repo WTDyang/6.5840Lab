@@ -604,7 +604,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 			}
 			if retry == false {
 				DPrintf(debug, "ERROR!!!\n\none(%v) failed to reach agreement\n\nERROR", cmd)
-				cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+				cfg.t.Fatalf("one(%v) failed to reach agreement %v", cmd, getFileLocation())
 			}
 		} else {
 			time.Sleep(50 * time.Millisecond)
@@ -612,7 +612,7 @@ func (cfg *config) one(cmd interface{}, expectedServers int, retry bool) int {
 		DPrintf(debug, "客户端准备重试 传入命令[%v] 上次传入位置[%v](-1表示未提交)", cmd, index)
 	}
 	if cfg.checkFinished() == false {
-		cfg.t.Fatalf("one(%v) failed to reach agreement", cmd)
+		cfg.t.Fatalf("one(%v) failed to reach agreement %v", cmd, getFileLocation())
 	}
 	return -1
 }

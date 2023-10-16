@@ -37,11 +37,11 @@ func init() {
 	if err != nil {
 		log.Fatalf("write the title failed: %v", err)
 	}
-	logger = log.New(io.MultiWriter(writer), "", 0)
+	logger = log.New(io.MultiWriter(os.Stdout), "", 0)
 }
 
 // Debugging
-const Debug = true
+const Debug = false
 
 func DPrintf(topic logTopic, format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -63,14 +63,14 @@ func DPrintf(topic logTopic, format string, a ...interface{}) (n int, err error)
 	return
 }
 
-//baseTimeout:最小超时时间(105*3 + 27 + 18) 105 为心跳间隔，27为网络short delay，可以接收失败三次 给18秒处理时间
-const baseTimeout = 360
+//baseTimeout:最小超时时间(110*4 + 27 + 23) 110 : 心跳间隔，27为网络short delay，可以接收失败三次 给23秒处理时间
+const baseTimeout = 490
 
-//randomElectionTimeout:随机超时时间（360-720ms）
+//randomElectionTimeout:随机超时时间（490-810ms）
 func randomElectionTimeout() time.Duration {
 	//To prevent split votes in the first place, election timeouts are chosen randomly from a fixed interval (e.g., 150–300ms)
 	//由于存在丢包，这里这是为250-600ms
-	extendedTimeout, err := rand.Int(rand.Reader, big.NewInt(360))
+	extendedTimeout, err := rand.Int(rand.Reader, big.NewInt(320))
 	if err != nil {
 		return baseTimeout * time.Millisecond
 	}

@@ -8,6 +8,6 @@ with open("errors.log","w") as w:
             lines = f.readlines()  
             for line_no, line in enumerate(lines): 
                 if "--- FAIL" in line:
-                    w.write("in %s : %d find error: %s" %filename %(line_no+1) %line)
+                    w.write("in %s : %d find error: %s" %(filename,line_no+1,line))
                 if "config.go" in line:
-                    w.write("%s:%d: %s" %filename %(line_no+1) %line)
+                    w.write("%s:%d: %s" %(filename,line_no+1,line))
