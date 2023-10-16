@@ -1,6 +1,6 @@
 @echo off
 
-set test_count=100
+set test_count=250
 set failed_tests=0
 set total_tests=0
 
@@ -10,7 +10,7 @@ for /l %%i in (1, 1, %test_count%) do (
 
     echo Running test iteration %%i ...
 
-    go test -run TestSnapshotInstallUnCrash2D > log.tmp
+    go test -run TestFigure8Unreliable2C > log.tmp
 
     rename log.tmp log%%i.log
 

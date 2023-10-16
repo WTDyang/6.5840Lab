@@ -500,6 +500,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 		rf.persist()
+		rf.electionTimer.Reset(randomElectionTimeout())
 	}
 	//为了保证安全性，首先检验日志的合法性
 	//候选人应当包含所有已提交的日志条目
