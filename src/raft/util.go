@@ -76,7 +76,13 @@ func randomElectionTimeout() time.Duration {
 	}
 	return time.Duration(baseTimeout+extendedTimeout.Int64()) * time.Millisecond
 }
-
+func randomElectionTime() time.Duration {
+	extendedTimeout, err := rand.Int(rand.Reader, big.NewInt(320))
+	if err != nil {
+		return baseTimeout * time.Millisecond
+	}
+	return time.Duration(baseTimeout+extendedTimeout.Int64()) * time.Millisecond
+}
 func min(a int, b int) int {
 	if a < b {
 		return a

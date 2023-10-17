@@ -77,7 +77,7 @@ type Raft struct {
 	votedFor       int         //candidateId that received vote in current	term (or null if none)
 	logs           []LogEntry  //log entries; each entry contains command for state machine, and term when entry was received by leader (first index is 1
 	state          int32       //enum for state(follower , candidate and leader)
-	electionTimer  *time.Timer //timeout
+	electionTimer  int64       //timeout
 	heartbeatTimer *time.Timer //heartbeatTimer
 
 	commitIndex int           //index of the highest log entry know to bew committed(init to 0)
@@ -86,7 +86,6 @@ type Raft struct {
 	matchIndex  []int         //for each server,index of the highest log entry known to be replicated on server(initialized to 0,increases monotonically[单调递增])
 	applyCh     chan ApplyMsg //chan to apply
 	commitFlag  chan struct{} //用来触发提交日志
-	tickerDone  chan struct{}
 	commitDone  chan struct{}
 
 	logNum            int           //日志的总数
@@ -167,7 +166,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//只要接收到正常的心跳就可以重置计时器，更新任期信息
 	reply.Term = rf.currentTerm
-	rf.electionTimer.Reset(randomElectionTimeout())
+	rf.resetElectionTIme()
 	DPrintf(follower, "Node[%v] term[%v] 心跳刷新", rf.me, args.Term)
 
 	if args.PrevLogIndex < rf.lastIncludedIndex {
@@ -429,7 +428,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	defer rf.persist()
 	//在身份转化的流程上面和心跳包把持一致
 	rf.state = FOLLOWER
-	rf.electionTimer.Reset(randomElectionTimeout())
+	rf.resetElectionTIme()
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
@@ -500,7 +499,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 		rf.persist()
-		//rf.electionTimer.Reset(randomElectionTimeout())
+		//rf.resetElectionTIme()
 	}
 	//为了保证安全性，首先检验日志的合法性
 	//候选人应当包含所有已提交的日志条目
@@ -531,7 +530,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 
 	// grant vote to candidate, reset election timer
-	rf.electionTimer.Reset(randomElectionTimeout())
+	rf.resetElectionTIme()
 	rf.votedFor = args.CandidateId
 	rf.persist()
 	DPrintf(common, "Node[%v] 投票给Node[%v]", rf.me, rf.votedFor)
@@ -650,10 +649,8 @@ func (rf *Raft) Kill() {
 	//关闭ticker和commandLog
 	go func() {
 		rf.commitDone <- struct{}{}
-		rf.tickerDone <- struct{}{}
 	}()
 	// Your code here, if desired.
-	rf.electionTimer.Stop()
 	rf.heartbeatTimer.Stop()
 	DPrintf(common, "Node[%v] 死掉了 属性为:%v", rf.me, rf)
 }
@@ -662,28 +659,25 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
-
+func (rf *Raft) resetElectionTIme() {
+	atomic.StoreInt64(&rf.electionTimer, time.Now().UnixMicro())
+}
 func (rf *Raft) ticker() {
-	for {
-		// Your code here (2A)
-		// Check if a leader election should be started.
-		select {
-		case <-rf.electionTimer.C:
-			rf.mu.Lock()
-			if rf.state == LEADER {
-				//if is a leader:beak
-				rf.electionTimer.Reset(randomElectionTimeout())
-				rf.mu.Unlock()
-				break
-			}
-			DPrintf(common, "Node[%v] Term[%v]超时,身份是[%v]\n", rf.me, rf.currentTerm, rf.state)
-			rf.state = CANDIDATE
-			rf.mu.Unlock()
-			go rf.elections()
-		case <-rf.tickerDone:
-			close(rf.tickerDone)
-			return
+	for !rf.killed() {
+		if time.Now().Sub(time.UnixMicro(atomic.LoadInt64(&rf.electionTimer))) < randomElectionTime() || rf.isLeader() {
+			time.Sleep(10 * time.Millisecond)
+			continue
 		}
+		rf.mu.Lock()
+		if time.Now().Sub(time.UnixMicro(atomic.LoadInt64(&rf.electionTimer))) < randomElectionTime() || rf.state == LEADER {
+			rf.mu.Unlock()
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		DPrintf(common, "Node[%v] Term[%v]超时,身份是[%v]\n", rf.me, rf.currentTerm, rf.state)
+		rf.state = CANDIDATE
+		rf.mu.Unlock()
+		go rf.elections()
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		//ms := 50 + (rand.Int63() % 300)
@@ -752,7 +746,7 @@ func (rf *Raft) InstallSnapshotModel(server int, args *InstallSnapshotArgs, repl
 				rf.currentTerm = reply.Term
 				rf.votedFor = -1
 				rf.state = FOLLOWER
-				rf.electionTimer.Reset(randomElectionTimeout())
+				rf.resetElectionTIme()
 				rf.persist()
 				rf.mu.Unlock()
 				return
@@ -816,7 +810,7 @@ func (rf *Raft) heartbeat(server int) {
 		rf.votedFor = -1
 		rf.state = FOLLOWER
 		rf.persist()
-		rf.electionTimer.Reset(randomElectionTimeout())
+		rf.resetElectionTIme()
 		rf.mu.Unlock()
 		return
 	}
@@ -900,7 +894,7 @@ func (rf *Raft) elections() {
 	rf.currentTerm++    // Increment currentTerm
 	rf.votedFor = rf.me // Vote for self
 	rf.persist()
-	rf.electionTimer.Reset(randomElectionTimeout()) // Reset election timer
+	rf.resetElectionTIme() // Reset election timer
 	rf.mu.Unlock()
 
 	requestVoteArg := RequestVoteArgs{LastLogTerm: -1, LastLogIndex: -1, CandidateId: rf.me}
@@ -1011,12 +1005,11 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.state = FOLLOWER //初始化为follower节点
 	rf.commitFlag = make(chan struct{})
 	rf.snapshotFlag = make(chan ApplyMsg)
-	rf.tickerDone = make(chan struct{})
 	rf.commitDone = make(chan struct{})
 	rf.logs = make([]LogEntry, 1)
 	rf.mu = LogRWMutex{raftId: me}
 	// Your initialization code here (2A, 2B, 2C).
-	rf.electionTimer = time.NewTimer(randomElectionTimeout())
+	rf.electionTimer = time.Now().UnixMicro()
 	rf.heartbeatTimer = time.NewTimer(10 * time.Millisecond)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
